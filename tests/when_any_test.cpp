@@ -2,12 +2,28 @@
 
 #include "test_assert.hpp"
 #include <coroutine>
+#include <cstddef>
 #include <expected>
 #include <memory>
 #include <optional>
 #include <variant>
 
 namespace {
+
+template<class Predicate>
+bool run_until(voris::io::default_scheduler& scheduler,
+               Predicate predicate,
+               std::size_t max_steps = 32) {
+    for (std::size_t step = 0; step < max_steps; ++step) {
+        if (predicate()) {
+            return true;
+        }
+        if (!scheduler.run_one()) {
+            return predicate();
+        }
+    }
+    return predicate();
+}
 
 class manual_gate {
     struct operation_state {
@@ -300,6 +316,18 @@ voris::io::task<int> mark_value_after_post(voris::io::scheduler_ref scheduler, b
     co_return 1;
 }
 
+voris::io::task<void> mark_after_when_any(voris::io::cancellation_source& losers,
+                                          manual_gate& winner_gate,
+                                          manual_gate& loser_gate,
+                                          bool& resumed) {
+    auto result = co_await voris::io::when_any(losers,
+                                               gated_value(winner_gate, 81),
+                                               gated_value(loser_gate, 82));
+    (void)result;
+    resumed = true;
+    co_return;
+}
+
 } // namespace
 
 int main() {
@@ -346,6 +374,57 @@ int main() {
         assert(result->index == 1);
         assert(std::get<1>(result->result).has_value());
         assert(*std::get<1>(result->result) == 22);
+    }
+
+    {
+        manual_gate winner_gate(ref);
+        manual_gate loser_gate(ref);
+        cancellation_source losers;
+        auto any = when_any(losers, gated_value(winner_gate, 21), gated_value(loser_gate, 22));
+        assert(!any.is_ready());
+
+        winner_gate.complete();
+        assert(run_until(scheduler, [&] { return losers.cancellation_requested(); }, 2));
+        assert(losers.reason() == cancellation_reason::manual);
+        assert(!any.is_ready());
+
+        loser_gate.complete();
+        assert(run_until(scheduler, [&] { return any.is_ready(); }));
+
+        auto result = std::move(any).take_result();
+        assert(result.has_value());
+        assert(result->index == 0);
+        assert(std::get<0>(result->result).has_value());
+        assert(*std::get<0>(result->result) == 21);
+    }
+
+    {
+        manual_gate winner_gate(ref);
+        manual_gate loser_gate(ref);
+        cancellation_token token;
+        task<when_any_result<io_result<int>, io_result<int>>> any;
+        {
+            cancellation_source scoped_losers;
+            token = scoped_losers.token();
+            any = when_any(scoped_losers,
+                           gated_value(winner_gate, 23),
+                           gated_value(loser_gate, 24));
+        }
+
+        assert(!any.is_ready());
+        winner_gate.complete();
+        assert(run_until(scheduler, [&] { return token.cancellation_requested(); }));
+        assert(token.reason() == cancellation_reason::manual);
+        assert(!any.is_ready());
+
+        loser_gate.complete();
+        assert(run_until(scheduler, [&] { return any.is_ready(); }));
+
+        auto result = std::move(any).take_result();
+        assert(result.has_value());
+        assert(result->index == 0);
+        assert(std::get<0>(result->result).has_value());
+        assert(*std::get<0>(result->result) == 23);
     }
 
     {
@@ -443,6 +522,44 @@ int main() {
         assert(scheduler.run_until_idle() >= 2);
         assert(!first_resumed);
         assert(!second_resumed);
+    }
+
+    {
+        manual_gate winner_gate(ref);
+        manual_gate loser_gate(ref);
+        cancellation_source losers;
+        bool parent_resumed = false;
+        {
+            auto parent = mark_after_when_any(losers, winner_gate, loser_gate, parent_resumed);
+            assert(!parent.is_ready());
+
+            winner_gate.complete();
+            assert(run_until(scheduler, [&] { return losers.cancellation_requested(); }, 2));
+            assert(!parent.is_ready());
+        }
+
+        assert(scheduler.run_until_idle() >= 1);
+        assert(!parent_resumed);
+    }
+
+    {
+        cancellation_source losers;
+        auto state = std::make_shared<detail::when_any_state<io_result<int>, io_result<int>>>(
+            losers);
+        detail::when_any_winner_awaiter<io_result<int>, io_result<int>> awaiter(state);
+        auto previous_scheduler = current_scheduler();
+
+        set_current_scheduler_for_testing(std::nullopt);
+        assert(!awaiter.await_ready());
+        assert(!awaiter.await_suspend(std::noop_coroutine()));
+        auto result = awaiter.await_resume();
+        set_current_scheduler_for_testing(previous_scheduler);
+
+        assert(result.index == 0);
+        assert(!std::get<0>(result.result).has_value());
+        assert(std::get<0>(result.result).error().classification == vio_error_code::invalid_state);
+        assert(losers.cancellation_requested());
+        assert(losers.reason() == cancellation_reason::manual);
     }
 
     return 0;

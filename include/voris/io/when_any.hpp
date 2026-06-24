@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -25,15 +26,30 @@ struct when_any_result {
 namespace detail {
 
 template<class... Results>
+[[nodiscard]] when_any_result<Results...> invalid_when_any_result(std::string diagnostic) {
+    using first_result = std::tuple_element_t<0, std::tuple<Results...>>;
+    return when_any_result<Results...>{
+        0, std::variant<Results...>{std::in_place_index<0>,
+                                    invalid_result<first_result>(std::move(diagnostic))}};
+}
+
+template<class... Results>
 class when_any_state : public std::enable_shared_from_this<when_any_state<Results...>> {
 public:
     using result_tuple = std::tuple<Results...>;
     using result_variant = std::variant<Results...>;
     using public_result = when_any_result<Results...>;
+    using first_result = std::tuple_element_t<0, result_tuple>;
+
+    when_any_state() = default;
+
+    explicit when_any_state(cancellation_source losers_source)
+        : losers_source_(std::move(losers_source)) {}
 
     template<std::size_t Index>
     void publish(std::tuple_element_t<Index, result_tuple> result) {
         std::optional<scheduler_ref> scheduler;
+        bool selected_winner = false;
         {
             std::scoped_lock lock(mutex_);
             if (winner_.has_value()) {
@@ -42,9 +58,14 @@ public:
 
             winner_index_ = Index;
             winner_.emplace(std::in_place_index<Index>, std::move(result));
+            selected_winner = true;
             if (!detached_ && parent_ && parent_scheduler_.has_value()) {
                 scheduler = parent_scheduler_;
             }
+        }
+
+        if (selected_winner) {
+            (void)losers_source_.request_cancellation(cancellation_reason::manual);
         }
 
         if (scheduler.has_value()) {
@@ -72,6 +93,25 @@ public:
         return true;
     }
 
+    void publish_invalid(std::string diagnostic) {
+        bool selected_winner = false;
+        {
+            std::scoped_lock lock(mutex_);
+            if (winner_.has_value()) {
+                return;
+            }
+
+            winner_index_ = 0;
+            winner_.emplace(std::in_place_index<0>,
+                            invalid_result<first_result>(std::move(diagnostic)));
+            selected_winner = true;
+        }
+
+        if (selected_winner) {
+            (void)losers_source_.request_cancellation(cancellation_reason::manual);
+        }
+    }
+
     void detach_parent() noexcept {
         std::scoped_lock lock(mutex_);
         detached_ = true;
@@ -81,6 +121,10 @@ public:
 
     public_result take_winner() {
         std::scoped_lock lock(mutex_);
+        if (!winner_.has_value()) {
+            return invalid_when_any_result<Results...>("when_any resumed without a winner");
+        }
+
         return public_result{winner_index_, std::move(*winner_)};
     }
 
@@ -115,6 +159,7 @@ private:
     std::size_t winner_index_{0};
     std::coroutine_handle<> parent_{};
     std::optional<scheduler_ref> parent_scheduler_{};
+    cancellation_source losers_source_{};
     bool detached_{false};
 };
 
@@ -150,8 +195,13 @@ public:
     }
 
     [[nodiscard]] bool await_suspend(std::coroutine_handle<> continuation) {
+        if (state_ == nullptr) {
+            return false;
+        }
+
         auto scheduler = current_scheduler();
         if (!scheduler.has_value()) {
+            state_->publish_invalid("when_any await without a current scheduler");
             return false;
         }
 
@@ -159,6 +209,10 @@ public:
     }
 
     public_result await_resume() {
+        if (state_ == nullptr) {
+            return invalid_when_any_result<Results...>("empty when_any awaiter");
+        }
+
         return state_->take_winner();
     }
 
@@ -198,19 +252,18 @@ template<std::size_t Index = 0, class TaskTuple, class State, class... Observers
 }
 
 template<class TaskTuple, std::size_t... Indices>
-[[nodiscard]] auto when_any_impl(cancellation_source& losers_source,
+[[nodiscard]] auto when_any_impl(cancellation_source losers_source,
                                  TaskTuple tasks,
                                  std::index_sequence<Indices...>)
     -> task<when_any_result<typename std::tuple_element_t<Indices, TaskTuple>::result_type...>> {
     using state_type =
         when_any_state<typename std::tuple_element_t<Indices, TaskTuple>::result_type...>;
-    auto state = std::make_shared<state_type>();
+    auto state = std::make_shared<state_type>(std::move(losers_source));
     auto observers = make_when_any_observers(tasks, state);
 
     auto winner =
         co_await when_any_winner_awaiter<
             typename std::tuple_element_t<Indices, TaskTuple>::result_type...>{state};
-    (void)losers_source.request_cancellation(cancellation_reason::manual);
 
     ((void)(co_await std::move(std::get<Indices>(observers))), ...);
     co_return std::move(winner);

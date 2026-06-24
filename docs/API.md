@@ -59,7 +59,9 @@ winning observation when it arrives first.
 
 After a winner is observed, `when_any` requests
 `cancellation_reason::manual` on the caller-provided `losers_source`. This is a
-request to losing operations, not permission to destroy them. `when_any` keeps
+request to losing operations, not permission to destroy them. The source is
+copied into the returned task's shared state, so the cancellation state remains
+available even if the caller's source object goes out of scope. `when_any` keeps
 observing all losing child tasks and does not complete its returned task until
 every observer has reached a terminal state. A loser that ignores cancellation
 keeps `when_any` pending until it completes naturally.
@@ -97,7 +99,7 @@ struct deadline {
 };
 
 template<class... A> auto when_all(A&&...);
-template<class... A> auto when_any(A&&...);
+template<class... A> auto when_any(cancellation_source& losers_source, A&&...);
 
 } // namespace voris::io
 ```
