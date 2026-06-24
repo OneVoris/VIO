@@ -16,7 +16,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 ## M1 — Cancellation, Deadlines, and Structured Concurrency
 
 - [x] **VIO-M1-001** Define cancellation reasons and token/source APIs.
-- [ ] **VIO-M1-002** Implement cancellation callback registration, including unregister-versus-callback races.
+- [x] **VIO-M1-002** Implement cancellation callback registration, including unregister-versus-callback races.
 - [x] **VIO-M1-003** Link deadlines and cancellation propagation.
 - [x] **VIO-M1-004** Write an ADR for the exactly-once operation-completion state machine.
 - [ ] **VIO-M1-005** Implement `async_scope::spawn`, `join`, and `request_stop`.
