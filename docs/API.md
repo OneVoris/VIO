@@ -49,6 +49,25 @@ Asynchronous APIs return VIO tasks and preserve the owner scheduler.
   ownership-transfer API; callers must not race task owner destruction with a
   scheduler continuation that can resume the same frame.
 
+### Task Combinators
+
+`when_any(cancellation_source& losers_source, tasks...)` returns a
+`task<when_any_result<task_i::result_type...>>`. The first child task to reach a
+terminal state wins. A terminal state includes a successful result and an error
+result stored in `io_result<T>` or `void_result`; an error result is still the
+winning observation when it arrives first.
+
+After a winner is observed, `when_any` requests
+`cancellation_reason::manual` on the caller-provided `losers_source`. This is a
+request to losing operations, not permission to destroy them. `when_any` keeps
+observing all losing child tasks and does not complete its returned task until
+every observer has reached a terminal state. A loser that ignores cancellation
+keeps `when_any` pending until it completes naturally.
+
+Abandoning the returned `when_any` task detaches its parent continuation. Later
+child completions or queued resume work must not resume the destroyed parent
+frame.
+
 ## Buffers
 
 Borrowed byte ranges use VMem-compatible views. APIs document whether input is borrowed, consumed, retained, or copied. Scatter/gather operating-system types stay private.
