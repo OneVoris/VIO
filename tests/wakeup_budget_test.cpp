@@ -124,8 +124,37 @@ int main() {
             assert(done.wait_for(lock, 2s, [&] { return ran; }));
         }
 
-        worker.request_stop();
+        assert(worker.submit([&worker] { worker.request_stop(); }).has_value());
         worker.join();
+        assert(!worker.running());
+    }
+
+    {
+        shard worker(4);
+        worker.start();
+        assert(worker.wait_for_idle_wait_for(2s));
+
+        std::mutex mutex;
+        std::condition_variable joined;
+        bool join_returned = false;
+
+        std::thread joiner([&] {
+            worker.join();
+            {
+                std::lock_guard lock(mutex);
+                join_returned = true;
+            }
+            joined.notify_one();
+        });
+
+        worker.request_stop();
+
+        {
+            std::unique_lock lock(mutex);
+            assert(joined.wait_for(lock, 2s, [&] { return join_returned; }));
+        }
+
+        joiner.join();
         assert(!worker.running());
     }
 

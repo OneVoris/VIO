@@ -43,15 +43,29 @@ public:
 
     void wait() {
         std::unique_lock lock(mutex_);
-        condition_.wait(lock, [this] { return pending_ != 0; });
+        if (pending_ == 0) {
+            ++waiters_;
+            condition_.notify_all();
+            condition_.wait(lock, [this] { return pending_ != 0; });
+            --waiters_;
+            condition_.notify_all();
+        }
         --pending_;
     }
 
     template<class Rep, class Period>
     [[nodiscard]] bool wait_for(const std::chrono::duration<Rep, Period>& timeout) {
         std::unique_lock lock(mutex_);
-        if (!condition_.wait_for(lock, timeout, [this] { return pending_ != 0; })) {
-            return false;
+        if (pending_ == 0) {
+            ++waiters_;
+            condition_.notify_all();
+            const bool signaled =
+                condition_.wait_for(lock, timeout, [this] { return pending_ != 0; });
+            --waiters_;
+            condition_.notify_all();
+            if (!signaled) {
+                return false;
+            }
         }
         --pending_;
         return true;
@@ -67,9 +81,23 @@ public:
     }
 
 private:
+    template<class Rep, class Period>
+    [[nodiscard]] bool wait_for_waiter_count_for(
+        std::size_t minimum_waiters,
+        const std::chrono::duration<Rep, Period>& timeout) const {
+        std::unique_lock lock(mutex_);
+        return condition_.wait_for(lock, timeout,
+                                   [this, minimum_waiters] {
+                                       return waiters_ >= minimum_waiters;
+                                   });
+    }
+
+    friend class shard;
+
     mutable std::mutex mutex_;
-    std::condition_variable condition_;
+    mutable std::condition_variable condition_;
     std::size_t pending_{0};
+    std::size_t waiters_{0};
 };
 
 } // namespace voris::io

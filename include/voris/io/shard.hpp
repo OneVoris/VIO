@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <mutex>
 #include <thread>
@@ -33,6 +34,11 @@ public:
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::thread::id thread_id() const noexcept;
     [[nodiscard]] runtime_metrics metrics() const;
+    template<class Rep, class Period>
+    [[nodiscard]] bool wait_for_idle_wait_for(
+        const std::chrono::duration<Rep, Period>& timeout) const {
+        return wakeup_.wait_for_waiter_count_for(1, timeout);
+    }
 
 private:
     void run_loop();
