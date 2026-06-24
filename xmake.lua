@@ -66,6 +66,8 @@ if has_config("build_tests") then
         native_handle_registry = "tests/native_handle_registry_test.cpp",
         epoll_backend = "tests/epoll_backend_test.cpp",
         io_uring_backend = "tests/io_uring_backend_test.cpp",
+        iocp_backend = "tests/iocp_backend_test.cpp",
+        kqueue_backend = "tests/kqueue_backend_test.cpp",
         runtime_builder = "tests/runtime_builder_test.cpp",
         runtime_metrics = "tests/runtime_metrics_test.cpp",
         scheduler = "tests/scheduler_test.cpp",
