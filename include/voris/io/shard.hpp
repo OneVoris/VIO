@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 
+#include <voris/io/backend_wakeup.hpp>
 #include <voris/io/detail/mailbox.hpp>
 #include <voris/io/runtime_metrics.hpp>
 #include <voris/io/scheduler.hpp>
@@ -37,6 +38,7 @@ private:
     void run_loop();
 
     detail::mailbox mailbox_;
+    backend_wakeup wakeup_;
     runtime_metrics metrics_;
     mutable std::mutex metrics_mutex_;
     std::atomic<bool> running_{false};

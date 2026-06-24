@@ -30,7 +30,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M2-001** Implement shard threads, thread-local context, and shard lifecycle.
 - [x] **VIO-M2-002** Implement bounded ready queues and cross-shard mailboxes.
 - [x] **VIO-M2-003** Implement cross-shard `submit_to` with move-only messages.
-- [ ] **VIO-M2-004** Implement the backend wake-up abstraction.
+- [x] **VIO-M2-004** Implement the backend wake-up abstraction.
 - [ ] **VIO-M2-005** Implement per-loop task, completion, and time budgets.
 - [ ] **VIO-M2-006** Implement scheduler-lag, queue-depth, and long-task counters.
 - [ ] **VIO-M2-007** Implement the runtime builder for shard count, CPU affinity, and queue limits.

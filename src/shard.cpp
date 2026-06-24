@@ -1,6 +1,5 @@
 #include <voris/io/shard.hpp>
 
-#include <chrono>
 #include <utility>
 
 namespace voris::io {
@@ -30,6 +29,9 @@ void_result shard::submit(continuation next) {
             ++metrics_.submitted_tasks;
         }
     }
+    if (result.has_value()) {
+        wakeup_.wake();
+    }
     return result;
 }
 
@@ -41,6 +43,9 @@ void_result shard::submit_system(continuation next) {
         if (result.has_value()) {
             ++metrics_.submitted_tasks;
         }
+    }
+    if (result.has_value()) {
+        wakeup_.wake();
     }
     return result;
 }
@@ -65,6 +70,7 @@ void shard::start() {
 
 void shard::request_stop() {
     stop_requested_ = true;
+    wakeup_.wake();
 }
 
 void shard::join() {
@@ -92,7 +98,8 @@ void shard::run_loop() {
     current_scheduler_scope scope(scheduler());
     while (!stop_requested_) {
         if (drain() == 0) {
-            std::this_thread::yield();
+            wakeup_.wait();
+            (void)wakeup_.consume_all();
         }
     }
     (void)drain();
