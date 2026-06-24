@@ -1,6 +1,6 @@
 #include <voris/io/when_all.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 
 namespace {
 

@@ -1,7 +1,7 @@
 #include <voris/io/file.hpp>
 
 #include <array>
-#include <cassert>
+#include "test_assert.hpp"
 #include <filesystem>
 
 int main() {

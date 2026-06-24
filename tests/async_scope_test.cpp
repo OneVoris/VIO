@@ -1,6 +1,6 @@
 #include <voris/io/async_scope.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <stdexcept>
 
 namespace {

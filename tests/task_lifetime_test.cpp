@@ -1,6 +1,6 @@
 #include <voris/io/task.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <type_traits>
 
 int main() {

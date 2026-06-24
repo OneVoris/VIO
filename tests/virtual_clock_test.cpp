@@ -1,6 +1,6 @@
 #include <voris/io/virtual_clock.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <chrono>
 
 int main() {

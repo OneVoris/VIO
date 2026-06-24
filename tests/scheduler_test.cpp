@@ -1,7 +1,7 @@
 #include <voris/io/scheduler.hpp>
 #include <voris/io/trampoline.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <memory>
 #include <vector>
 

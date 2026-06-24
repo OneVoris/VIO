@@ -1,6 +1,6 @@
 #include <voris/io/version.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 
 int main() {
     assert(!voris::io::version().empty());

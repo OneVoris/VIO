@@ -1,6 +1,6 @@
 #include <voris/io/submit.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <memory>
 
 int main() {

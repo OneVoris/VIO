@@ -1,6 +1,6 @@
 #include <voris/io/detail/mailbox.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <vector>
 
 int main() {

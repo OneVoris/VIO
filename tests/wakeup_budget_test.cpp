@@ -1,7 +1,7 @@
 #include <voris/io/backend_wakeup.hpp>
 #include <voris/io/loop_budget.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 
 int main() {
     using namespace voris::io;

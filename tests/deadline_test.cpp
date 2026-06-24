@@ -8,7 +8,7 @@
 #define VIO_DEADLINE_TEST_HAS_CANCELLATION 0
 #endif
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <chrono>
 
 int main() {

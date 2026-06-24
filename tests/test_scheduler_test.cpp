@@ -1,6 +1,6 @@
 #include <voris/io/test_scheduler.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <memory>
 #include <vector>
 

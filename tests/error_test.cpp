@@ -1,6 +1,6 @@
 #include <voris/io/error.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <expected>
 #include <string>
 #include <string_view>

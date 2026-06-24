@@ -1,7 +1,7 @@
 #include <voris/io/backends/epoll_backend.hpp>
 #include <voris/io/backends/io_uring_backend.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 
 int main() {
     using namespace voris::io;

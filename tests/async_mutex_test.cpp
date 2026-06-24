@@ -1,6 +1,6 @@
 #include <voris/io/async_mutex.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 
 int main() {
     using namespace voris::io;

@@ -1,6 +1,6 @@
 #include <voris/io/cancellation.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 #include <optional>
 #include <string_view>
 #include <type_traits>

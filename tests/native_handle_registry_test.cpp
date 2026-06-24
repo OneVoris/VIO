@@ -1,6 +1,6 @@
 #include <voris/io/detail/native_handle_registry.hpp>
 
-#include <cassert>
+#include "test_assert.hpp"
 
 int main() {
     using namespace voris::io;
