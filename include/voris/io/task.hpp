@@ -137,15 +137,13 @@ public:
             return;
         }
 
-        auto fallback_state = state;
         auto scheduled = trampoline::schedule_system(*scheduler, [state = std::move(state)] {
             resume_task_continuation(std::move(state));
         });
         if (!scheduled.has_value()) {
-            // The reserved lane should normally accept runtime continuations. If that
-            // lane is exhausted too, resume deterministically instead of stranding the
-            // awaiting coroutine forever.
-            resume_task_continuation(std::move(fallback_state));
+            // Reserved/system continuation capacity exhaustion is an internal invariant
+            // violation until a richer M8 diagnostic policy exists.
+            std::terminate();
         }
     }
 

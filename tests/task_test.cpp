@@ -4,8 +4,11 @@
 
 #include "test_assert.hpp"
 #include <coroutine>
+#include <cstdlib>
+#include <exception>
 #include <memory>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -130,6 +133,33 @@ voris::io::task<int> awaiting_gated_child(inline_gate& gate) {
     co_return *child + 1;
 }
 
+int run_task_system_lane_exhaustion_child() {
+    std::set_terminate([] { std::_Exit(42); });
+
+    voris::io::shard saturated(1);
+    inline_gate gate;
+    voris::io::current_scheduler_scope scope(saturated.scheduler());
+    auto parent = awaiting_gated_child(gate);
+    assert(!parent.is_ready());
+    assert(voris::io::trampoline::schedule_system(saturated.scheduler(), [] {}).has_value());
+
+    gate.complete();
+    return 0;
+}
+
+int run_child_process(char const* executable, char const* mode) {
+    std::string command = "\"";
+    command += executable;
+    command += "\" ";
+    command += mode;
+#ifdef _WIN32
+    command += " >NUL 2>NUL";
+#else
+    command += " >/dev/null 2>/dev/null";
+#endif
+    return std::system(command.c_str());
+}
+
 voris::io::task<void> repeated_await_attempt(voris::io::io_result<int>& first,
                                              voris::io::io_result<int>& second) {
     auto child = value_task(5);
@@ -140,8 +170,12 @@ voris::io::task<void> repeated_await_attempt(voris::io::io_result<int>& first,
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     using namespace voris::io;
+
+    if (argc == 2 && std::string(argv[1]) == "--task-system-lane-exhaustion") {
+        return run_task_system_lane_exhaustion_child();
+    }
 
     set_current_scheduler_for_testing(std::nullopt);
     bool missing_scheduler_body_entered = false;
@@ -222,20 +256,7 @@ int main() {
     }
 
     {
-        shard saturated(1);
-        inline_gate gate;
-        current_scheduler_scope scope(saturated.scheduler());
-        auto parent = awaiting_gated_child(gate);
-        assert(!parent.is_ready());
-        assert(trampoline::schedule_system(saturated.scheduler(), [] {}).has_value());
-
-        gate.complete();
-        assert(parent.is_ready());
-
-        auto parent_result = std::move(parent).take_result();
-        assert(parent_result.has_value());
-        assert(*parent_result == 42);
-        assert(saturated.drain() == 1);
+        assert(run_child_process(argv[0], "--task-system-lane-exhaustion") != 0);
     }
 
     {

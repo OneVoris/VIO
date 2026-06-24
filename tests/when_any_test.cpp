@@ -5,9 +5,12 @@
 #include "test_assert.hpp"
 #include <coroutine>
 #include <cstddef>
+#include <cstdlib>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <optional>
+#include <string>
 #include <variant>
 
 namespace {
@@ -373,6 +376,36 @@ voris::io::task<int> inline_gated_value(inline_gate& gate, int value) {
     co_return value;
 }
 
+int run_when_any_system_lane_exhaustion_child() {
+    using namespace voris::io;
+
+    std::set_terminate([] { std::_Exit(42); });
+
+    shard saturated(1);
+    cancellation_source losers;
+    auto state = std::make_shared<detail::when_any_state<io_result<int>, io_result<int>>>(
+        losers);
+    current_scheduler_scope scope(saturated.scheduler());
+    assert(state->install_parent(std::noop_coroutine(), saturated.scheduler()));
+    assert(trampoline::schedule_system(saturated.scheduler(), [] {}).has_value());
+
+    state->publish<0>(io_result<int>{71});
+    return 0;
+}
+
+int run_child_process(char const* executable, char const* mode) {
+    std::string command = "\"";
+    command += executable;
+    command += "\" ";
+    command += mode;
+#ifdef _WIN32
+    command += " >NUL 2>NUL";
+#else
+    command += " >/dev/null 2>/dev/null";
+#endif
+    return std::system(command.c_str());
+}
+
 voris::io::task<void> gated_void(manual_gate& gate) {
     co_await gate;
     co_return;
@@ -412,8 +445,12 @@ voris::io::task<void> mark_after_when_any(voris::io::cancellation_source& losers
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     using namespace voris::io;
+
+    if (argc == 2 && std::string(argv[1]) == "--when-any-system-lane-exhaustion") {
+        return run_when_any_system_lane_exhaustion_child();
+    }
 
     default_scheduler scheduler;
     scheduler_ref ref(scheduler);
@@ -654,30 +691,7 @@ int main() {
     }
 
     {
-        shard saturated(1);
-        inline_gate winner_gate;
-        inline_gate loser_gate;
-        cancellation_source losers;
-        current_scheduler_scope shard_scope(saturated.scheduler());
-        auto any = when_any(losers,
-                            inline_gated_value(winner_gate, 71),
-                            inline_gated_value(loser_gate, 72));
-        assert(!any.is_ready());
-        assert(trampoline::schedule_system(saturated.scheduler(), [] {}).has_value());
-
-        winner_gate.complete();
-        assert(losers.cancellation_requested());
-        assert(!any.is_ready());
-
-        loser_gate.complete();
-        assert(any.is_ready());
-
-        auto result = std::move(any).take_result();
-        assert(result.has_value());
-        assert(result->index == 0);
-        assert(std::get<0>(result->result).has_value());
-        assert(*std::get<0>(result->result) == 71);
-        assert(saturated.drain() == 1);
+        assert(run_child_process(argv[0], "--when-any-system-lane-exhaustion") != 0);
     }
 
     {
