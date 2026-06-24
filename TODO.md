@@ -4,21 +4,21 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 ## M0 — Semantics and a Testable Kernel
 
-- [ ] **VIO-M0-001** Create the `voris_vio` target, repository layout, and public error types.
-- [ ] **VIO-M0-002** Write an ADR for eager versus lazy tasks, continuation scheduling, destruction, and exception semantics.
+- [x] **VIO-M0-001** Create the `voris_vio` target, repository layout, and public error types.
+- [x] **VIO-M0-002** Write an ADR for eager versus lazy tasks, continuation scheduling, destruction, and exception semantics.
 - [ ] **VIO-M0-003** Implement move-only `task<T>` and `task<void>` promise types.
-- [ ] **VIO-M0-004** Implement `scheduler_ref` and current-scheduler lookup.
+- [x] **VIO-M0-004** Implement `scheduler_ref` and current-scheduler lookup.
 - [ ] **VIO-M0-005** Implement a trampoline that prevents unbounded recursion from synchronous completion.
-- [ ] **VIO-M0-006** Implement a deterministic single-thread test scheduler.
-- [ ] **VIO-M0-007** Implement a virtual monotonic clock.
+- [x] **VIO-M0-006** Implement a deterministic single-thread test scheduler.
+- [x] **VIO-M0-007** Implement a virtual monotonic clock.
 - [ ] **VIO-M0-008** Add tests for task lifetime, exceptions, moves, empty tasks, and repeated await attempts.
 
 ## M1 — Cancellation, Deadlines, and Structured Concurrency
 
-- [ ] **VIO-M1-001** Define cancellation reasons and token/source APIs.
+- [x] **VIO-M1-001** Define cancellation reasons and token/source APIs.
 - [ ] **VIO-M1-002** Implement cancellation callback registration, including unregister-versus-callback races.
-- [ ] **VIO-M1-003** Link deadlines and cancellation propagation.
-- [ ] **VIO-M1-004** Write an ADR for the exactly-once operation-completion state machine.
+- [x] **VIO-M1-003** Link deadlines and cancellation propagation.
+- [x] **VIO-M1-004** Write an ADR for the exactly-once operation-completion state machine.
 - [ ] **VIO-M1-005** Implement `async_scope::spawn`, `join`, and `request_stop`.
 - [ ] **VIO-M1-006** Implement scope error aggregation and a background-task error sink.
 - [ ] **VIO-M1-007** Implement `when_all`.
@@ -27,7 +27,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 ## M2 — Shard Runtime and Scheduling
 
-- [ ] **VIO-M2-001** Implement shard threads, thread-local context, and shard lifecycle.
+- [x] **VIO-M2-001** Implement shard threads, thread-local context, and shard lifecycle.
 - [ ] **VIO-M2-002** Implement bounded ready queues and cross-shard mailboxes.
 - [ ] **VIO-M2-003** Implement cross-shard `submit_to` with move-only messages.
 - [ ] **VIO-M2-004** Implement the backend wake-up abstraction.
@@ -40,23 +40,23 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 ## M3 — Timers and Asynchronous Primitives
 
 - [ ] **VIO-M3-001** Implement an indexed timer heap and timer handles.
-- [ ] **VIO-M3-002** Implement `sleep_until` and `sleep_for`.
+- [x] **VIO-M3-002** Implement `sleep_until` and `sleep_for`.
 - [ ] **VIO-M3-003** Implement timer cancellation, same-deadline batching, and clock-jump protection.
-- [ ] **VIO-M3-004** Implement bounded `channel<T>` send, receive, and close.
+- [x] **VIO-M3-004** Implement bounded `channel<T>` send, receive, and close.
 - [ ] **VIO-M3-005** Add cancellation and deadlines to channel waiters.
 - [ ] **VIO-M3-006** Implement `async_semaphore`.
 - [ ] **VIO-M3-007** Implement `async_mutex` without resuming waiters while holding its internal lock.
-- [ ] **VIO-M3-008** Implement a manual-reset event.
-- [ ] **VIO-M3-009** Evaluate a timer wheel and change the default only if benchmarks show the heap is a bottleneck.
+- [x] **VIO-M3-008** Implement a manual-reset event.
+- [x] **VIO-M3-009** Evaluate a timer wheel and change the default only if benchmarks show the heap is a bottleneck.
 
 ## M4 — Linux epoll Backend
 
-- [ ] **VIO-M4-001** Define the backend contract for register, submit, cancel, poll, wake, and shutdown.
-- [ ] **VIO-M4-002** Implement a generation-safe native-handle registry.
+- [x] **VIO-M4-001** Define the backend contract for register, submit, cancel, poll, wake, and shutdown.
+- [x] **VIO-M4-002** Implement a generation-safe native-handle registry.
 - [ ] **VIO-M4-003** Implement epoll polling and `eventfd` wake-up.
 - [ ] **VIO-M4-004** Implement nonblocking `read_some` and `write_some`.
 - [ ] **VIO-M4-005** Implement accept and connect, including `EINPROGRESS` and `SO_ERROR` handling.
-- [ ] **VIO-M4-006** Define and implement queueing rules for multiple read or write operations; reject undefined concurrent use.
+- [x] **VIO-M4-006** Define and implement queueing rules for multiple read or write operations; reject undefined concurrent use.
 - [ ] **VIO-M4-007** Implement close with pending-operation cancellation, stale-event defense, and file-descriptor reuse handling.
 - [ ] **VIO-M4-008** Implement `readv` and `writev` buffer-chain adapters.
 - [ ] **VIO-M4-009** Cover partial I/O, `EINTR`, `EAGAIN`, peer reset, and half-close.
@@ -66,10 +66,10 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 - [ ] **VIO-M5-001** Implement a bounded blocking executor whose full queue returns a resource error.
 - [ ] **VIO-M5-002** Implement asynchronous file open, close, `read_at`, and `write_at`.
-- [ ] **VIO-M5-003** Implement file size, truncate, and allocation-hint operations.
-- [ ] **VIO-M5-004** Implement `sync_data` and `sync_all` and document platform durability semantics.
-- [ ] **VIO-M5-005** Define completion when a started blocking system call cannot be forcibly cancelled.
-- [ ] **VIO-M5-006** Expose sendfile-compatible access without leaking raw ownership.
+- [x] **VIO-M5-003** Implement file size, truncate, and allocation-hint operations.
+- [x] **VIO-M5-004** Implement `sync_data` and `sync_all` and document platform durability semantics.
+- [x] **VIO-M5-005** Define completion when a started blocking system call cannot be forcibly cancelled.
+- [x] **VIO-M5-006** Expose sendfile-compatible access without leaking raw ownership.
 - [ ] **VIO-M5-007** Test file-pool saturation, shutdown, short reads/writes, and disk errors.
 
 ## M6 — io_uring Backend
@@ -89,7 +89,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [ ] **VIO-M7-002** Implement IOCP handle association and batched completion retrieval.
 - [ ] **VIO-M7-003** Define `OVERLAPPED` operation lifetime and cancellation behavior.
 - [ ] **VIO-M7-004** Run the complete backend contract suite on macOS and Windows.
-- [ ] **VIO-M7-005** Document cancellation and file-I/O semantics that cannot be made identical across platforms.
+- [x] **VIO-M7-005** Document cancellation and file-I/O semantics that cannot be made identical across platforms.
 
 ## M8 — Hardening, Benchmarks, and Release
 

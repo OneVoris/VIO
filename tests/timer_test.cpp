@@ -34,5 +34,10 @@ int main() {
     assert(result.has_value());
     assert(clock.now() == virtual_monotonic_clock::time_point{5ms});
 
+    auto slept_until = sleep_until(clock, virtual_monotonic_clock::time_point{12ms});
+    auto until_result = std::move(slept_until).take_result();
+    assert(until_result.has_value());
+    assert(clock.now() == virtual_monotonic_clock::time_point{12ms});
+
     return 0;
 }
