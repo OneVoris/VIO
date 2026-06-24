@@ -42,6 +42,12 @@ int main() {
     assert(failure.error().classification == vio_error_code::invalid_state);
     assert(scope.errors().size() == 1);
     assert(sink.size() == 1);
+
+    auto second_failure = scope.spawn(failing_task());
+    assert(!second_failure.has_value());
+    assert(second_failure.error().classification == vio_error_code::invalid_state);
+    assert(scope.errors().size() == 2);
+    assert(sink.size() == 2);
     assert(!scope.join().has_value());
 
     assert(scope.request_stop());
