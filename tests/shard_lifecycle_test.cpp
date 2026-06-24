@@ -1,4 +1,5 @@
 #include <voris/io/shard.hpp>
+#include <voris/io/trampoline.hpp>
 
 #include "test_assert.hpp"
 #include <atomic>
@@ -22,6 +23,27 @@ int main() {
     assert(rejected.error().classification == vio_error_code::resource_exhausted);
     assert(saturated.drain() == 1);
     assert(scheduled == 1);
+
+    shard direct_saturated(1);
+    int direct_scheduled = 0;
+    assert(direct_saturated.submit([&direct_scheduled] { direct_scheduled += 1; }).has_value());
+    auto direct_rejected = direct_saturated.enqueue([&direct_scheduled] { direct_scheduled += 10; });
+    assert(!direct_rejected.has_value());
+    assert(direct_rejected.error().classification == vio_error_code::resource_exhausted);
+    assert(direct_saturated.drain() == 1);
+    assert(direct_scheduled == 1);
+
+    shard trampoline_saturated(1);
+    int trampoline_scheduled = 0;
+    assert(trampoline_saturated.submit([&trampoline_scheduled] { trampoline_scheduled += 1; })
+               .has_value());
+    auto trampoline_rejected =
+        trampoline::schedule(trampoline_saturated.scheduler(),
+                             [&trampoline_scheduled] { trampoline_scheduled += 10; });
+    assert(!trampoline_rejected.has_value());
+    assert(trampoline_rejected.error().classification == vio_error_code::resource_exhausted);
+    assert(trampoline_saturated.drain() == 1);
+    assert(trampoline_scheduled == 1);
 
     default_scheduler local;
     int default_ran = 0;

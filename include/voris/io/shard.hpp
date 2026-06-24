@@ -20,7 +20,7 @@ public:
     shard& operator=(const shard&) = delete;
 
     [[nodiscard]] scheduler_ref scheduler() noexcept;
-    void enqueue(continuation next);
+    [[nodiscard]] void_result enqueue(continuation next);
     [[nodiscard]] void_result submit(continuation next);
     [[nodiscard]] std::size_t drain();
 

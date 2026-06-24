@@ -23,6 +23,11 @@ concept submits_continuation = requires(Scheduler& scheduler, continuation next)
 };
 
 template<class Scheduler>
+concept result_enqueues_continuation = requires(Scheduler& scheduler, continuation next) {
+    { scheduler.enqueue(std::move(next)) } -> std::same_as<void_result>;
+};
+
+template<class Scheduler>
 concept enqueues_continuation = requires(Scheduler& scheduler, continuation next) {
     scheduler.enqueue(std::move(next));
 };
@@ -38,12 +43,15 @@ public:
     template<class Scheduler>
         requires(!std::same_as<std::remove_cvref_t<Scheduler>, scheduler_ref> &&
                  (detail::submits_continuation<Scheduler> ||
+                  detail::result_enqueues_continuation<Scheduler> ||
                   detail::enqueues_continuation<Scheduler>))
     explicit scheduler_ref(Scheduler& scheduler) noexcept
         : object_(&scheduler),
           schedule_([](void* object, continuation next) -> void_result {
               if constexpr (detail::submits_continuation<Scheduler>) {
                   return static_cast<Scheduler*>(object)->submit(std::move(next));
+              } else if constexpr (detail::result_enqueues_continuation<Scheduler>) {
+                  return static_cast<Scheduler*>(object)->enqueue(std::move(next));
               } else {
                   static_cast<Scheduler*>(object)->enqueue(std::move(next));
                   return {};

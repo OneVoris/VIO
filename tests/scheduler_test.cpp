@@ -68,10 +68,10 @@ int main() {
 
     {
         current_scheduler_scope scope(ref);
-        trampoline::schedule(ref, [&order, ref] {
+        assert(trampoline::schedule(ref, [&order, ref] {
             order.push_back(4);
-            trampoline::schedule(ref, [&order] { order.push_back(5); });
-        });
+            assert(trampoline::schedule(ref, [&order] { order.push_back(5); }).has_value());
+        }).has_value());
     }
     assert(scheduler.run_until_idle() >= 1);
     assert(order == std::vector<int>({1, 2, 3, 4, 5}));
@@ -89,12 +89,12 @@ int main() {
         }
         ++count;
         if (count < 128) {
-            trampoline::schedule(inline_ref, chain);
+            assert(trampoline::schedule(inline_ref, chain).has_value());
         }
         --current_depth;
     };
 
-    trampoline::schedule(inline_ref, chain);
+    assert(trampoline::schedule(inline_ref, chain).has_value());
     assert(count == 128);
     assert(max_depth == 1);
 

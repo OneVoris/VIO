@@ -70,9 +70,13 @@ public:
 
         if (scheduler.has_value()) {
             auto state = this->shared_from_this();
-            trampoline::schedule(*scheduler, [state = std::move(state)] {
+            auto scheduled = trampoline::schedule(*scheduler, [state = std::move(state)] {
                 state->resume_parent();
             });
+            if (!scheduled.has_value()) {
+                // TODO(M2/M8): reserve system continuation capacity so winner publication can
+                // deterministically wake or fail the parent when its scheduler is saturated.
+            }
         }
     }
 

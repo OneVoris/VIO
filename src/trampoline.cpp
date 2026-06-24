@@ -37,8 +37,8 @@ void run_continuation(continuation next) {
 
 } // namespace
 
-void trampoline::schedule(scheduler_ref scheduler, continuation next) {
-    (void)scheduler.schedule([next = std::move(next)] mutable {
+void_result trampoline::schedule(scheduler_ref scheduler, continuation next) {
+    return scheduler.schedule([next = std::move(next)] mutable {
         run_continuation(std::move(next));
     });
 }

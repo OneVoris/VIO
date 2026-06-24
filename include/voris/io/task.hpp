@@ -126,7 +126,7 @@ public:
             return;
         }
 
-        trampoline::schedule(*scheduler, [state = std::move(state)] {
+        auto scheduled = trampoline::schedule(*scheduler, [state = std::move(state)] {
             std::coroutine_handle<> continuation{};
             scheduler_ref scheduler{};
             if (!state->claim(continuation, scheduler)) {
@@ -136,6 +136,10 @@ public:
             current_scheduler_scope scope(scheduler);
             continuation.resume();
         });
+        if (!scheduled.has_value()) {
+            // TODO(M2/M8): reserve system continuation capacity so final_suspend can report
+            // deterministic scheduling failure instead of leaving the awaiter suspended.
+        }
     }
 
     void await_resume() const noexcept {}

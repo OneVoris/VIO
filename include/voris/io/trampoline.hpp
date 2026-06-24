@@ -6,7 +6,7 @@ namespace voris::io {
 
 class trampoline {
 public:
-    static void schedule(scheduler_ref scheduler, continuation next);
+    [[nodiscard]] static void_result schedule(scheduler_ref scheduler, continuation next);
 };
 
 } // namespace voris::io

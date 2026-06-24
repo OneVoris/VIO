@@ -17,8 +17,8 @@ scheduler_ref shard::scheduler() noexcept {
     return scheduler_ref(*this);
 }
 
-void shard::enqueue(continuation next) {
-    (void)submit(std::move(next));
+void_result shard::enqueue(continuation next) {
+    return submit(std::move(next));
 }
 
 void_result shard::submit(continuation next) {
