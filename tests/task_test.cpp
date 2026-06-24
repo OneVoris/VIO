@@ -46,6 +46,14 @@ voris::io::task<int> awaiting_parent(voris::io::scheduler_ref scheduler) {
     co_return *child + 1;
 }
 
+voris::io::task<void> repeated_await_attempt(voris::io::io_result<int>& first,
+                                             voris::io::io_result<int>& second) {
+    auto child = value_task(5);
+    first = co_await std::move(child);
+    second = co_await std::move(child);
+    co_return;
+}
+
 } // namespace
 
 int main() {
@@ -109,6 +117,19 @@ int main() {
         auto parent_result = std::move(parent).take_result();
         assert(parent_result.has_value());
         assert(*parent_result == 42);
+    }
+
+    {
+        current_scheduler_scope scope(ref);
+        io_result<int> first = std::unexpected(make_error(vio_error_code::invalid_state));
+        io_result<int> second = std::unexpected(make_error(vio_error_code::invalid_state));
+        auto repeated = repeated_await_attempt(first, second);
+        auto repeated_result = std::move(repeated).take_result();
+        assert(repeated_result.has_value());
+        assert(first.has_value());
+        assert(*first == 5);
+        assert(!second.has_value());
+        assert(second.error().classification == vio_error_code::invalid_state);
     }
 
     return 0;

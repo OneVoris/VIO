@@ -6,12 +6,12 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 - [x] **VIO-M0-001** Create the `voris_vio` target, repository layout, and public error types.
 - [x] **VIO-M0-002** Write an ADR for eager versus lazy tasks, continuation scheduling, destruction, and exception semantics.
-- [ ] **VIO-M0-003** Implement move-only `task<T>` and `task<void>` promise types.
+- [x] **VIO-M0-003** Implement move-only `task<T>` and `task<void>` promise types.
 - [x] **VIO-M0-004** Implement `scheduler_ref` and current-scheduler lookup.
-- [ ] **VIO-M0-005** Implement a trampoline that prevents unbounded recursion from synchronous completion.
+- [x] **VIO-M0-005** Implement a trampoline that prevents unbounded recursion from synchronous completion.
 - [x] **VIO-M0-006** Implement a deterministic single-thread test scheduler.
 - [x] **VIO-M0-007** Implement a virtual monotonic clock.
-- [ ] **VIO-M0-008** Add tests for task lifetime, exceptions, moves, empty tasks, and repeated await attempts.
+- [x] **VIO-M0-008** Add tests for task lifetime, exceptions, moves, empty tasks, and repeated await attempts.
 
 ## M1 — Cancellation, Deadlines, and Structured Concurrency
 

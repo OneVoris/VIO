@@ -2,8 +2,22 @@
 #include <voris/io/trampoline.hpp>
 
 #include "test_assert.hpp"
+#include <functional>
 #include <memory>
 #include <vector>
+
+namespace {
+
+class inline_scheduler {
+public:
+    void enqueue(voris::io::continuation next) {
+        if (next) {
+            next();
+        }
+    }
+};
+
+} // namespace
 
 int main() {
     using namespace voris::io;
@@ -61,6 +75,28 @@ int main() {
     }
     assert(scheduler.run_until_idle() >= 1);
     assert(order == std::vector<int>({1, 2, 3, 4, 5}));
+
+    inline_scheduler inline_target;
+    scheduler_ref inline_ref(inline_target);
+    int count = 0;
+    int current_depth = 0;
+    int max_depth = 0;
+    std::function<void()> chain;
+    chain = [&] {
+        ++current_depth;
+        if (current_depth > max_depth) {
+            max_depth = current_depth;
+        }
+        ++count;
+        if (count < 128) {
+            trampoline::schedule(inline_ref, chain);
+        }
+        --current_depth;
+    };
+
+    trampoline::schedule(inline_ref, chain);
+    assert(count == 128);
+    assert(max_depth == 1);
 
     return 0;
 }
