@@ -48,12 +48,18 @@ target_end()
 if has_config("build_tests") then
     local test_sources = {
         smoke = "tests/smoke.cpp",
+        async_scope = "tests/async_scope_test.cpp",
+        cancellation = "tests/cancellation_test.cpp",
+        cancellation_stress = "tests/cancellation_stress_test.cpp",
+        deadline = "tests/deadline_test.cpp",
         error = "tests/error_test.cpp",
         scheduler = "tests/scheduler_test.cpp",
         task = "tests/task_test.cpp",
         task_lifetime = "tests/task_lifetime_test.cpp",
         test_scheduler = "tests/test_scheduler_test.cpp",
         virtual_clock = "tests/virtual_clock_test.cpp",
+        when_all = "tests/when_all_test.cpp",
+        when_any = "tests/when_any_test.cpp",
     }
 
     for name, source in pairs(test_sources) do
