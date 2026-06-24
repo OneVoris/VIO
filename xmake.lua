@@ -3,6 +3,7 @@ set_version("0.1.0")
 set_languages("cxx23")
 set_warnings("allextra")
 add_rules("mode.debug", "mode.release")
+add_repositories("vxrepo https://github.com/OneVoris/VXrepo.git")
 
 option("build_shared")
     set_default(false)
