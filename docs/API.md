@@ -13,9 +13,17 @@ The source baseline is C++23. Public headers may use concepts, `std::expected`, 
 
 ## Error Model
 
-- Normal failures use explicit result values.
-- Stable error enums are never reordered or reused after release.
+- Normal failures use explicit result values: `io_result<T>` is an alias for
+  `std::expected<T, vio_error>`, and `void_result` is an alias for
+  `std::expected<void, vio_error>`.
+- `vio_error` is the public runtime error value. It carries a stable
+  `vio_error_code` classification, an optional provider error code, diagnostic
+  text for logging only, and a source location captured by helper construction.
+- Stable error enum values are never reordered or reused after release.
 - Platform/provider error codes may be attached for diagnostics but are not the only public classification.
+- Error equality and ordering use only the stable classification and provider code.
+  Diagnostic text and source location are not API-contract data and must not
+  drive control flow.
 - Invariant violations and invalid external input are distinct categories.
 
 ## Ownership

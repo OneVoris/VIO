@@ -71,20 +71,20 @@ VIO/
 
 ## Build the Scaffold
 
+Register VXrepo so XMake can resolve the required released Voris packages:
+
+```bash
+xrepo add-repo vxrepo <VXREPO_GIT_URL>
+xrepo info voris-vmem
+```
+
 ```bash
 xmake f -m debug --build_tests=y
 xmake
 xmake test
 ```
 
-The scaffold builds without resolving upstream packages. Once implementation begins, register VXrepo and enable dependency resolution:
-
-```bash
-xrepo add-repo vxrepo <VXREPO_GIT_URL>
-xmake f -m debug --build_tests=y --with_voris_dependencies=y
-xmake
-xmake test
-```
+VMem is required from M0 onward. VIO consumes the latest released `voris-vmem` package available through VXrepo with no explicit version selector in this repository. Record the actual resolved version from `xrepo info voris-vmem` in local build evidence and release notes rather than pinning it in source.
 
 ## Package Identity
 

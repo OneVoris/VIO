@@ -22,11 +22,11 @@ C++23 coroutine runtime, per-core shard scheduler, cancellation, timers, asynchr
 
 | Dependency | Kind | Version policy |
 |---|---|---|
-| `voris-vmem` | Required | Pin to one compatible `0.x` minor through VXrepo. |
+| `voris-vmem` | Required | Latest released VXrepo package; no explicit version selector in this repository. |
 | C++ standard library | Required | C++23 baseline. |
 | Test/benchmark tools | Development only | Must not leak into the public ABI. |
 
-The repository consumes only released public upstream APIs through VXrepo. Private headers, source copying, and relative cross-repository include paths are prohibited.
+The repository consumes only released public upstream APIs through VXrepo. Private headers, source copying, and relative cross-repository include paths are prohibited. The actual resolved `voris-vmem` version is build evidence from `xrepo info voris-vmem`; it is not pinned in the repository.
 
 ## 3. Component Model
 
@@ -111,4 +111,4 @@ Public interfaces use C++23, move-only ownership where appropriate, `std::expect
 
 ## 11. Versioning
 
-During `0.x`, source compatibility may change between minor versions. Downstream package constraints must pin a compatible minor range. A public ABI promise begins only after a separately approved stability milestone.
+During `0.x`, source compatibility may change between minor versions. VIO follows the latest released `voris-vmem` package exposed by VXrepo and records the resolved version during validation. A public ABI promise begins only after a separately approved stability milestone.

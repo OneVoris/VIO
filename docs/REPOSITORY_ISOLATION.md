@@ -13,6 +13,7 @@ VIO is maintained as an independent source repository. Its internal upstream set
 ## Supported Coupling
 
 - Released public headers and link artifacts resolved from VXrepo.
+- The latest released `voris-vmem` package selected by VXrepo with no explicit version selector in this repository.
 - Versioned provider interfaces and adapters.
 - Public conformance, integration, and interoperability tests.
 - A separate integration workspace that consumes packages exactly as an external project would.
@@ -23,7 +24,7 @@ When blocked by an upstream defect or missing public capability:
 
 1. Refresh upstream package metadata.
 2. Record the resolved version and commit/tag.
-3. Verify the issue still exists in the newest compatible release.
+3. Verify the issue still exists in the latest released package selected by VXrepo.
 4. Produce a minimal reproducer that uses public APIs only.
 5. Submit a structured requirement to the owning upstream repository.
 6. Track the request locally without committing Agent-private notes.
@@ -32,4 +33,4 @@ A temporary adapter is permitted only when it uses the existing public API, has 
 
 ## Release Coordination
 
-The owning upstream repository releases first. VXrepo publishes the immutable version and checksum second. The downstream repository updates and tests its version constraint third.
+The owning upstream repository releases first. VXrepo publishes the immutable version and checksum second. The downstream repository tests the no-version selector and records the resolved version from `xrepo info` third.
