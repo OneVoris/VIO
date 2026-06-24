@@ -32,7 +32,7 @@ bool async_scope::stop_requested() const {
 }
 
 std::size_t async_scope::pending_count() const noexcept {
-    return pending_;
+    return children_.size();
 }
 
 bool async_scope::request_stop(cancellation_reason reason) {
@@ -45,21 +45,27 @@ void_result async_scope::spawn(task<void> child) {
                                           "scope is stopping"));
     }
 
-    ++pending_;
-    auto result = std::move(child).take_result();
-    --pending_;
-    if (!result.has_value()) {
-        errors_.push_back(result.error());
-        if (sink_ != nullptr) {
-            sink_->record(result.error());
-        }
-        return std::unexpected(result.error());
+    auto owned_child = std::make_unique<task_child<void>>(std::move(child));
+    if (owned_child->is_ready()) {
+        return observe_child_result(owned_child->finish());
     }
+
+    children_.push_back(std::move(owned_child));
     return {};
 }
 
 void_result async_scope::join() {
-    if (pending_ != 0) {
+    for (auto child = children_.begin(); child != children_.end();) {
+        if (!(*child)->is_ready()) {
+            ++child;
+            continue;
+        }
+
+        (void)observe_child_result((*child)->finish());
+        child = children_.erase(child);
+    }
+
+    if (!children_.empty()) {
         return std::unexpected(make_error(vio_error_code::invalid_state,
                                           "scope has pending tasks"));
     }
@@ -71,6 +77,23 @@ void_result async_scope::join() {
 
 const std::vector<vio_error>& async_scope::errors() const noexcept {
     return errors_;
+}
+
+void async_scope::record_error(vio_error error) {
+    errors_.push_back(error);
+    if (sink_ != nullptr) {
+        sink_->record(std::move(error));
+    }
+}
+
+void_result async_scope::observe_child_result(void_result result) {
+    if (result.has_value()) {
+        return {};
+    }
+
+    vio_error error = result.error();
+    record_error(error);
+    return std::unexpected(std::move(error));
 }
 
 } // namespace voris::io
