@@ -4,6 +4,7 @@
 #include "test_assert.hpp"
 #include <atomic>
 #include <barrier>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -26,21 +27,91 @@ struct terminal_outcome {
     voris::io::void_result result{};
 };
 
+// This helper is an executable/test-only ADR 0002 operation arbitration model.
+// Move these scenarios into backend contract tests once the formal operation/backend surface exists.
+struct operation_arbitration_state {
+    explicit operation_arbitration_state(voris::io::cancellation_token token_value)
+        : token(std::move(token_value)) {}
+
+    voris::io::cancellation_token token;
+    mutable std::mutex mutex;
+    std::optional<terminal_outcome> terminal{};
+    bool backend_reference_published{false};
+    bool backend_reference_released{false};
+    bool observer_attached{true};
+    bool observed{false};
+    int queued_count{0};
+    int observed_count{0};
+    int backend_release_count{0};
+    int cancellation_callback_count{0};
+};
+
+[[nodiscard]] bool select_terminal_locked(operation_arbitration_state& state,
+                                          terminal_outcome outcome) {
+    if (state.terminal.has_value()) {
+        return false;
+    }
+
+    state.terminal = std::move(outcome);
+    if (state.observer_attached) {
+        ++state.queued_count;
+    }
+    return true;
+}
+
+void on_cancellation(const std::shared_ptr<operation_arbitration_state>& state,
+                     voris::io::cancellation_reason reason) {
+    assert(!voris::io::detail::cancellation_internal_lock_held_for_testing(state->token));
+
+    std::lock_guard guard(state->mutex);
+    ++state->cancellation_callback_count;
+    (void)select_terminal_locked(*state, terminal_outcome{
+                                             .kind = terminal_kind::cancelled,
+                                             .cancellation = reason,
+                                             .result = std::unexpected(voris::io::make_error(
+                                                 voris::io::vio_error_code::cancelled,
+                                                 "operation cancelled")),
+                                         });
+}
+
+[[nodiscard]] std::optional<terminal_outcome> terminal_for_testing(
+    const std::shared_ptr<operation_arbitration_state>& state) {
+    std::lock_guard guard(state->mutex);
+    return state->terminal;
+}
+
+[[nodiscard]] int queued_count_for_testing(
+    const std::shared_ptr<operation_arbitration_state>& state) {
+    std::lock_guard guard(state->mutex);
+    return state->queued_count;
+}
+
+[[nodiscard]] int cancellation_callback_count_for_testing(
+    const std::shared_ptr<operation_arbitration_state>& state) {
+    std::lock_guard guard(state->mutex);
+    return state->cancellation_callback_count;
+}
+
 class operation_arbitration_model {
 public:
     explicit operation_arbitration_model(voris::io::cancellation_token token)
-        : token_(std::move(token)) {
-        registration_ = token_.register_callback(
-            [this](voris::io::cancellation_reason reason) { on_cancellation(reason); });
+        : state_(std::make_shared<operation_arbitration_state>(std::move(token))) {
+        std::weak_ptr<operation_arbitration_state> weak_state = state_;
+        registration_ = state_->token.register_callback(
+            [weak_state](voris::io::cancellation_reason reason) {
+                if (auto state = weak_state.lock()) {
+                    on_cancellation(state, reason);
+                }
+            });
     }
 
     [[nodiscard]] bool submit() {
-        std::lock_guard guard(mutex_);
-        if (terminal_.has_value()) {
+        std::lock_guard guard(state_->mutex);
+        if (state_->terminal.has_value()) {
             return false;
         }
 
-        backend_reference_published_ = true;
+        state_->backend_reference_published = true;
         return true;
     }
 
@@ -62,97 +133,65 @@ public:
     }
 
     void detach_observer() {
-        std::lock_guard guard(mutex_);
-        observer_attached_ = false;
+        std::lock_guard guard(state_->mutex);
+        state_->observer_attached = false;
     }
 
     [[nodiscard]] std::optional<terminal_outcome> terminal() const {
-        std::lock_guard guard(mutex_);
-        return terminal_;
+        return terminal_for_testing(state_);
     }
 
     [[nodiscard]] std::optional<terminal_outcome> observe_once() {
-        std::lock_guard guard(mutex_);
-        if (!terminal_.has_value() || !observer_attached_ || observed_) {
+        std::lock_guard guard(state_->mutex);
+        if (!state_->terminal.has_value() || !state_->observer_attached || state_->observed) {
             return std::nullopt;
         }
 
-        observed_ = true;
-        ++observed_count_;
-        return terminal_;
+        state_->observed = true;
+        ++state_->observed_count;
+        return state_->terminal;
     }
 
     [[nodiscard]] int queued_count() const {
-        std::lock_guard guard(mutex_);
-        return queued_count_;
+        return queued_count_for_testing(state_);
     }
 
     [[nodiscard]] int observed_count() const {
-        std::lock_guard guard(mutex_);
-        return observed_count_;
+        std::lock_guard guard(state_->mutex);
+        return state_->observed_count;
     }
 
     [[nodiscard]] int backend_release_count() const {
-        std::lock_guard guard(mutex_);
-        return backend_release_count_;
+        std::lock_guard guard(state_->mutex);
+        return state_->backend_release_count;
     }
 
-    [[nodiscard]] int cancellation_callback_count() const noexcept {
-        return cancellation_callback_count_.load();
+    [[nodiscard]] int cancellation_callback_count() const {
+        return cancellation_callback_count_for_testing(state_);
+    }
+
+    [[nodiscard]] std::shared_ptr<operation_arbitration_state> state_for_testing()
+        const noexcept {
+        return state_;
     }
 
 private:
-    void on_cancellation(voris::io::cancellation_reason reason) {
-        assert(!voris::io::detail::cancellation_internal_lock_held_for_testing(token_));
-        cancellation_callback_count_.fetch_add(1);
-
-        std::lock_guard guard(mutex_);
-        (void)select_terminal_locked(terminal_outcome{
-            .kind = terminal_kind::cancelled,
-            .cancellation = reason,
-            .result = std::unexpected(voris::io::make_error(
-                voris::io::vio_error_code::cancelled, "operation cancelled")),
-        });
-    }
-
     [[nodiscard]] bool backend_complete(terminal_outcome outcome) {
-        std::lock_guard guard(mutex_);
-        if (!backend_reference_published_) {
+        std::lock_guard guard(state_->mutex);
+        if (!state_->backend_reference_published) {
             return false;
         }
 
-        if (!backend_reference_released_) {
-            backend_reference_released_ = true;
-            ++backend_release_count_;
+        if (!state_->backend_reference_released) {
+            state_->backend_reference_released = true;
+            ++state_->backend_release_count;
         }
 
-        return select_terminal_locked(std::move(outcome));
+        return select_terminal_locked(*state_, std::move(outcome));
     }
 
-    [[nodiscard]] bool select_terminal_locked(terminal_outcome outcome) {
-        if (terminal_.has_value()) {
-            return false;
-        }
-
-        terminal_ = std::move(outcome);
-        if (observer_attached_) {
-            ++queued_count_;
-        }
-        return true;
-    }
-
-    voris::io::cancellation_token token_;
+    std::shared_ptr<operation_arbitration_state> state_;
     voris::io::cancellation_registration registration_;
-    mutable std::mutex mutex_;
-    std::optional<terminal_outcome> terminal_{};
-    bool backend_reference_published_{false};
-    bool backend_reference_released_{false};
-    bool observer_attached_{true};
-    bool observed_{false};
-    int queued_count_{0};
-    int observed_count_{0};
-    int backend_release_count_{0};
-    std::atomic<int> cancellation_callback_count_{0};
 };
 
 void assert_cancelled_terminal(const terminal_outcome& terminal,
@@ -372,6 +411,38 @@ void stress_detached_observer_does_not_observe_twice() {
     }
 }
 
+void cancellation_snapshot_after_model_destruction_keeps_callback_target_alive() {
+    using namespace voris::io;
+
+    cancellation_source source;
+    std::barrier callback_snapshotted(2);
+    std::barrier allow_callback_chain_to_continue(2);
+
+    auto blocker = source.token().register_callback([&](cancellation_reason) {
+        callback_snapshotted.arrive_and_wait();
+        allow_callback_chain_to_continue.arrive_and_wait();
+    });
+
+    std::optional<operation_arbitration_model> operation(std::in_place, source.token());
+    auto state = operation->state_for_testing();
+    assert(operation->submit());
+
+    std::thread canceller([&] {
+        assert(source.request_cancellation(cancellation_reason::manual));
+    });
+
+    callback_snapshotted.arrive_and_wait();
+    operation.reset();
+    allow_callback_chain_to_continue.arrive_and_wait();
+    canceller.join();
+
+    auto terminal = terminal_for_testing(state);
+    assert(terminal.has_value());
+    assert_cancelled_terminal(*terminal, cancellation_reason::manual);
+    assert(queued_count_for_testing(state) == 1);
+    assert(cancellation_callback_count_for_testing(state) == 1);
+}
+
 } // namespace
 
 int main() {
@@ -443,6 +514,7 @@ int main() {
     stress_late_cancel_after_success_or_failure_is_ignored();
     stress_repeated_cancellation_retains_first_reason();
     stress_detached_observer_does_not_observe_twice();
+    cancellation_snapshot_after_model_destruction_keeps_callback_target_alive();
 
     return 0;
 }
