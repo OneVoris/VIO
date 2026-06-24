@@ -27,11 +27,11 @@ public:
         return ran;
     }
 
-    [[nodiscard]] std::size_t queued() const noexcept {
+    [[nodiscard]] std::size_t queued() const {
         return queue_.size();
     }
 
-    [[nodiscard]] std::size_t capacity_waiters() const noexcept {
+    [[nodiscard]] std::size_t capacity_waiters() const {
         return queue_.capacity_waiters();
     }
 

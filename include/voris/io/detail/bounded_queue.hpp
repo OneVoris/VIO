@@ -20,17 +20,17 @@ public:
         return capacity_;
     }
 
-    [[nodiscard]] std::size_t size() const noexcept {
+    [[nodiscard]] std::size_t size() const {
         std::lock_guard lock(mutex_);
         return items_.size();
     }
 
-    [[nodiscard]] bool empty() const noexcept {
+    [[nodiscard]] bool empty() const {
         std::lock_guard lock(mutex_);
         return items_.empty();
     }
 
-    [[nodiscard]] bool full() const noexcept {
+    [[nodiscard]] bool full() const {
         std::lock_guard lock(mutex_);
         return items_.size() >= capacity_;
     }
@@ -62,9 +62,13 @@ public:
     }
 
     // Saturated failed-push pressure while full, reset when the queue accepts or frees capacity.
-    [[nodiscard]] std::size_t capacity_waiters() const noexcept {
+    [[nodiscard]] std::size_t full_pressure() const {
         std::lock_guard lock(mutex_);
         return capacity_waiters_;
+    }
+
+    [[nodiscard]] std::size_t capacity_waiters() const {
+        return full_pressure();
     }
 
 private:

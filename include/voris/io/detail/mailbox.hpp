@@ -33,7 +33,7 @@ public:
         return ran;
     }
 
-    [[nodiscard]] std::size_t size() const noexcept {
+    [[nodiscard]] std::size_t size() const {
         return queue_.size();
     }
 
@@ -41,11 +41,16 @@ public:
         return queue_.capacity();
     }
 
-    [[nodiscard]] bool full() const noexcept {
+    [[nodiscard]] bool full() const {
         return queue_.full();
     }
 
-    [[nodiscard]] std::size_t capacity_waiters() const noexcept {
+    // Saturated count of failed submits observed while the mailbox is full.
+    [[nodiscard]] std::size_t full_pressure() const {
+        return queue_.full_pressure();
+    }
+
+    [[nodiscard]] std::size_t capacity_waiters() const {
         return queue_.capacity_waiters();
     }
 

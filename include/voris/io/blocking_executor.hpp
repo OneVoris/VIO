@@ -35,7 +35,7 @@ public:
         return shutting_down_;
     }
 
-    [[nodiscard]] std::size_t queued() const noexcept {
+    [[nodiscard]] std::size_t queued() const {
         return queue_.size();
     }
 

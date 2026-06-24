@@ -15,6 +15,20 @@ namespace voris::io {
 
 using continuation = std::move_only_function<void()>;
 
+namespace detail {
+
+template<class Scheduler>
+concept submits_continuation = requires(Scheduler& scheduler, continuation next) {
+    { scheduler.submit(std::move(next)) } -> std::same_as<void_result>;
+};
+
+template<class Scheduler>
+concept enqueues_continuation = requires(Scheduler& scheduler, continuation next) {
+    scheduler.enqueue(std::move(next));
+};
+
+} // namespace detail
+
 class scheduler_ref {
 public:
     scheduler_ref() noexcept = default;
@@ -23,21 +37,25 @@ public:
 
     template<class Scheduler>
         requires(!std::same_as<std::remove_cvref_t<Scheduler>, scheduler_ref> &&
-                 requires(Scheduler& scheduler, continuation next) {
-                     scheduler.enqueue(std::move(next));
-                 })
+                 (detail::submits_continuation<Scheduler> ||
+                  detail::enqueues_continuation<Scheduler>))
     explicit scheduler_ref(Scheduler& scheduler) noexcept
         : object_(&scheduler),
-          enqueue_([](void* object, continuation next) {
-              static_cast<Scheduler*>(object)->enqueue(std::move(next));
+          schedule_([](void* object, continuation next) -> void_result {
+              if constexpr (detail::submits_continuation<Scheduler>) {
+                  return static_cast<Scheduler*>(object)->submit(std::move(next));
+              } else {
+                  static_cast<Scheduler*>(object)->enqueue(std::move(next));
+                  return {};
+              }
           }) {}
 
     [[nodiscard]] explicit operator bool() const noexcept {
-        return object_ != nullptr && enqueue_ != nullptr;
+        return object_ != nullptr && schedule_ != nullptr;
     }
 
     [[nodiscard]] bool operator==(const scheduler_ref& other) const noexcept {
-        return object_ == other.object_ && enqueue_ == other.enqueue_;
+        return object_ == other.object_ && schedule_ == other.schedule_;
     }
 
     [[nodiscard]] void* identity() const noexcept {
@@ -48,15 +66,14 @@ public:
         if (!*this || !next) {
             return std::unexpected(make_error(vio_error_code::invalid_state));
         }
-        enqueue_(object_, std::move(next));
-        return {};
+        return schedule_(object_, std::move(next));
     }
 
 private:
-    using enqueue_fn = void (*)(void*, continuation);
+    using schedule_fn = void_result (*)(void*, continuation);
 
     void* object_{nullptr};
-    enqueue_fn enqueue_{nullptr};
+    schedule_fn schedule_{nullptr};
 };
 
 [[nodiscard]] std::optional<scheduler_ref> current_scheduler() noexcept;

@@ -23,17 +23,23 @@ void shard::enqueue(continuation next) {
 
 void_result shard::submit(continuation next) {
     auto result = mailbox_.submit(std::move(next));
-    metrics_.queue_depth.store(mailbox_.size());
-    if (result.has_value()) {
-        metrics_.submitted_tasks.fetch_add(1);
+    {
+        std::lock_guard lock(metrics_mutex_);
+        metrics_.queue_depth = mailbox_.size();
+        if (result.has_value()) {
+            ++metrics_.submitted_tasks;
+        }
     }
     return result;
 }
 
 std::size_t shard::drain() {
     const std::size_t ran = mailbox_.run_until_idle();
-    metrics_.completed_tasks.fetch_add(ran);
-    metrics_.queue_depth.store(mailbox_.size());
+    {
+        std::lock_guard lock(metrics_mutex_);
+        metrics_.completed_tasks += ran;
+        metrics_.queue_depth = mailbox_.size();
+    }
     return ran;
 }
 
@@ -64,7 +70,8 @@ std::thread::id shard::thread_id() const noexcept {
     return thread_id_;
 }
 
-const runtime_metrics& shard::metrics() const noexcept {
+runtime_metrics shard::metrics() const {
+    std::lock_guard lock(metrics_mutex_);
     return metrics_;
 }
 

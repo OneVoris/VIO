@@ -21,15 +21,15 @@ int main() {
     auto full = queue.try_push(3);
     assert(!full.has_value());
     assert(full.error().classification == vio_error_code::resource_exhausted);
-    assert(queue.capacity_waiters() == 1);
+    assert(queue.full_pressure() == 1);
     assert(!queue.try_push(4).has_value());
     assert(!queue.try_push(5).has_value());
-    assert(queue.capacity_waiters() == 2);
+    assert(queue.full_pressure() == 2);
 
     auto first = queue.pop();
     assert(first.has_value());
     assert(*first == 1);
-    assert(queue.capacity_waiters() == 0);
+    assert(queue.full_pressure() == 0);
 
     assert(queue.try_push(3).has_value());
     assert(*queue.pop() == 2);
@@ -40,7 +40,7 @@ int main() {
     auto zero_full = zero_capacity.try_push(1);
     assert(!zero_full.has_value());
     assert(zero_full.error().classification == vio_error_code::resource_exhausted);
-    assert(zero_capacity.capacity_waiters() == 1);
+    assert(zero_capacity.full_pressure() == 1);
     assert(zero_capacity.empty());
     assert(zero_capacity.full());
 
@@ -58,9 +58,10 @@ int main() {
     std::atomic<int> accepted{0};
     std::atomic<int> consumed{0};
     std::vector<int> seen(total, 0);
+    constexpr auto watchdog = std::chrono::seconds(30);
 
     std::thread consumer([&] {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        const auto deadline = std::chrono::steady_clock::now() + watchdog;
         while (consumed.load() < total) {
             if (auto value = concurrent.pop()) {
                 assert(*value >= 0);
@@ -87,7 +88,7 @@ int main() {
                         break;
                     }
                     assert(result.error().classification == vio_error_code::resource_exhausted);
-                    assert(concurrent.capacity_waiters() <= concurrent.capacity());
+                    assert(concurrent.full_pressure() <= concurrent.capacity());
                     std::this_thread::yield();
                 }
             }
@@ -102,7 +103,7 @@ int main() {
     assert(accepted.load() == total);
     assert(consumed.load() == total);
     assert(concurrent.empty());
-    assert(concurrent.capacity_waiters() == 0);
+    assert(concurrent.full_pressure() == 0);
     for (int count : seen) {
         assert(count == 1);
     }

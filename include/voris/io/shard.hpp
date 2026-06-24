@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <mutex>
 #include <thread>
 
 #include <voris/io/detail/mailbox.hpp>
@@ -29,13 +30,14 @@ public:
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::thread::id thread_id() const noexcept;
-    [[nodiscard]] const runtime_metrics& metrics() const noexcept;
+    [[nodiscard]] runtime_metrics metrics() const;
 
 private:
     void run_loop();
 
     detail::mailbox mailbox_;
     runtime_metrics metrics_;
+    mutable std::mutex metrics_mutex_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::thread thread_;

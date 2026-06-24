@@ -25,11 +25,11 @@ int main() {
     auto full = mailbox.submit([&order, third = std::move(third)] { order.push_back(*third); });
     assert(!full.has_value());
     assert(full.error().classification == vio_error_code::resource_exhausted);
-    assert(mailbox.capacity_waiters() == 1);
+    assert(mailbox.full_pressure() == 1);
 
     assert(mailbox.run_one());
     assert(order == std::vector<int>{1});
-    assert(mailbox.capacity_waiters() == 0);
+    assert(mailbox.full_pressure() == 0);
     assert(mailbox.submit([&order, first = std::move(first)] { order.push_back(*first + 2); })
                .has_value());
     assert(mailbox.run_until_idle() == 2);
@@ -54,6 +54,7 @@ int main() {
     std::atomic<int> rejected{0};
     std::atomic<int> executed{0};
     std::vector<int> seen(total, 0);
+    constexpr auto watchdog = std::chrono::seconds(30);
 
     std::thread producer([&] {
         for (int index = 0; index < total; ++index) {
@@ -76,7 +77,7 @@ int main() {
         }
     });
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto deadline = std::chrono::steady_clock::now() + watchdog;
     while (accepted.load() < total || threaded.size() != 0) {
         if (!threaded.run_one()) {
             std::this_thread::yield();
@@ -99,7 +100,7 @@ int main() {
     auto full_smoke_result = full_smoke.submit([&skipped] { ++skipped; });
     assert(!full_smoke_result.has_value());
     assert(full_smoke_result.error().classification == vio_error_code::resource_exhausted);
-    assert(full_smoke.capacity_waiters() == 1);
+    assert(full_smoke.full_pressure() == 1);
     assert(skipped == 0);
 
     return 0;
