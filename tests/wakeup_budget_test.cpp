@@ -132,7 +132,7 @@ int main() {
     {
         shard worker(4);
         worker.start();
-        assert(worker.wait_for_idle_wait_for(2s));
+        assert(worker.wait_until_parked_for(2s));
 
         std::mutex mutex;
         std::condition_variable joined;
