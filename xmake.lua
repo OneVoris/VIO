@@ -49,9 +49,12 @@ if has_config("build_tests") then
     local test_sources = {
         smoke = "tests/smoke.cpp",
         async_scope = "tests/async_scope_test.cpp",
+        async_mutex = "tests/async_mutex_test.cpp",
+        async_semaphore = "tests/async_semaphore_test.cpp",
         bounded_queue = "tests/bounded_queue_test.cpp",
         cancellation = "tests/cancellation_test.cpp",
         cancellation_stress = "tests/cancellation_stress_test.cpp",
+        channel = "tests/channel_test.cpp",
         compute_executor = "tests/compute_executor_test.cpp",
         deadline = "tests/deadline_test.cpp",
         error = "tests/error_test.cpp",
@@ -64,8 +67,10 @@ if has_config("build_tests") then
         task = "tests/task_test.cpp",
         task_lifetime = "tests/task_lifetime_test.cpp",
         test_scheduler = "tests/test_scheduler_test.cpp",
+        timer = "tests/timer_test.cpp",
         submit_to = "tests/submit_to_test.cpp",
         virtual_clock = "tests/virtual_clock_test.cpp",
+        manual_reset_event = "tests/manual_reset_event_test.cpp",
         wakeup_budget = "tests/wakeup_budget_test.cpp",
         when_all = "tests/when_all_test.cpp",
         when_any = "tests/when_any_test.cpp",
@@ -79,4 +84,12 @@ if has_config("build_tests") then
         add_tests(name)
     target_end()
     end
+end
+
+if has_config("build_benchmarks") then
+    target("vio_timer_heap_benchmark")
+        set_kind("binary")
+        add_files("benchmarks/timer_heap_benchmark.cpp")
+        add_deps("voris_vio")
+    target_end()
 end
