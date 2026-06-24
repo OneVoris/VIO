@@ -27,6 +27,10 @@ Destroying a non-empty task before it has been awaited abandons the task. The de
 
 Destroying a completed task destroys only the completed coroutine frame and stored result or error.
 
+Task owner operations are scheduler/shard-confined unless a more specific API explicitly documents stronger thread-safety. Owner operations include destruction, move construction, move assignment, `take_result`, and `await_resume` on a task awaiter. A caller may perform those operations from another thread only after externally synchronizing ownership transfer so that no scheduler continuation can concurrently claim and resume the same owned frame.
+
+VIO does not guarantee safety for arbitrary cross-thread destruction or movement of an owning `task` or task awaiter racing with scheduler-side continuation claiming. The continuation state used by the task implementation may still be internally synchronized for continuation installation, detach, final-suspend completion publication, and claim/clear. That internal protocol prevents a queued continuation from resuming a detached frame within the same ownership domain and prevents the completion-before-continuation-install window from hanging a parent coroutine; it is not a general frame pinning mechanism for unsynchronized owner destruction.
+
 ### Creation and Start Timing
 
 Task creation starts the coroutine eagerly. The task promise captures the current scheduler before user coroutine body code runs. If no current scheduler is installed, the coroutine body is not entered; the task completes with `vio_error_code::invalid_state`.
@@ -95,6 +99,8 @@ Inline final-suspend continuation resumption was rejected because synchronous co
 ## Consequences
 
 Task ownership is simple and local: one non-empty task or awaiter owns one coroutine frame. Move-only, single-await semantics make repeated observation a deterministic `invalid_state` failure instead of shared mutable state.
+
+Callers that transfer task ownership across threads or shards must do so explicitly through scheduler/ownership-transfer APIs or provide their own synchronization around owner operations. Avoiding frame pinning keeps M1 task destruction non-blocking and local, but it also makes unsynchronized cross-thread owner destruction outside the task contract.
 
 Eager start means task functions perform work immediately under the current scheduler. Callers that need deferred start must use a separate explicit abstraction, such as a factory, scope spawn operation, or scheduler submission API.
 

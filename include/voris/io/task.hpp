@@ -3,6 +3,8 @@
 #include <coroutine>
 #include <exception>
 #include <expected>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -14,6 +16,80 @@
 namespace voris::io {
 
 namespace detail {
+
+enum class task_continuation_install_result {
+    suspend,
+    ready,
+    already_consumed,
+};
+
+// Queued final-suspend work can outlive the child frame; this state lets an
+// abandoning parent detach the continuation before the frame is destroyed.
+struct task_continuation_state {
+    mutable std::mutex mutex{};
+    std::coroutine_handle<> continuation{};
+    std::optional<scheduler_ref> scheduler{};
+    bool completed{false};
+    bool detached{false};
+    bool consumed{false};
+
+    void detach() noexcept {
+        std::scoped_lock lock(mutex);
+        continuation = {};
+        scheduler.reset();
+        detached = true;
+    }
+
+    [[nodiscard]] bool is_completed() const noexcept {
+        std::scoped_lock lock(mutex);
+        return completed;
+    }
+
+    [[nodiscard]] task_continuation_install_result install(std::coroutine_handle<> next,
+                                                          scheduler_ref next_scheduler) noexcept {
+        std::scoped_lock lock(mutex);
+        if (consumed) {
+            return task_continuation_install_result::already_consumed;
+        }
+
+        consumed = true;
+        if (completed || detached) {
+            return task_continuation_install_result::ready;
+        }
+
+        continuation = next;
+        scheduler = next_scheduler;
+        return task_continuation_install_result::suspend;
+    }
+
+    [[nodiscard]] std::optional<scheduler_ref> publish_completed() noexcept {
+        std::scoped_lock lock(mutex);
+        completed = true;
+        if (detached || !continuation || !scheduler.has_value()) {
+            return std::nullopt;
+        }
+        return *scheduler;
+    }
+
+    [[nodiscard]] bool claim(std::coroutine_handle<>& claimed,
+                             scheduler_ref& claimed_scheduler) noexcept {
+        std::scoped_lock lock(mutex);
+        if (detached || !continuation || !scheduler.has_value()) {
+            return false;
+        }
+
+        claimed = continuation;
+        claimed_scheduler = *scheduler;
+        continuation = {};
+        scheduler.reset();
+        return true;
+    }
+
+    void mark_completed() noexcept {
+        std::scoped_lock lock(mutex);
+        completed = true;
+    }
+};
 
 template<class Promise>
 class task_initial_awaiter {
@@ -40,13 +116,23 @@ public:
 
     void await_suspend(std::coroutine_handle<Promise> completed) const noexcept {
         auto& promise = completed.promise();
-        if (!promise.continuation || !promise.continuation_scheduler.has_value()) {
+        auto state = promise.continuation_state;
+        if (!state) {
             return;
         }
 
-        const std::coroutine_handle<> continuation = promise.continuation;
-        const scheduler_ref scheduler = *promise.continuation_scheduler;
-        trampoline::schedule(scheduler, [continuation, scheduler] {
+        auto scheduler = state->publish_completed();
+        if (!scheduler.has_value()) {
+            return;
+        }
+
+        trampoline::schedule(*scheduler, [state = std::move(state)] {
+            std::coroutine_handle<> continuation{};
+            scheduler_ref scheduler{};
+            if (!state->claim(continuation, scheduler)) {
+                return;
+            }
+
             current_scheduler_scope scope(scheduler);
             continuation.resume();
         });
@@ -112,15 +198,18 @@ public:
     class awaiter {
     public:
         explicit awaiter(handle_type handle) noexcept
-            : handle_(handle) {}
+            : handle_(handle),
+              continuation_state_(handle ? handle.promise().continuation_state : nullptr) {}
 
         awaiter(const awaiter&) = delete;
         awaiter& operator=(const awaiter&) = delete;
 
         awaiter(awaiter&& other) noexcept
-            : handle_(std::exchange(other.handle_, {})) {}
+            : handle_(std::exchange(other.handle_, {})),
+              continuation_state_(std::move(other.continuation_state_)) {}
 
         ~awaiter() {
+            detach();
             if (handle_) {
                 handle_.destroy();
             }
@@ -137,8 +226,7 @@ public:
                 return false;
             }
 
-            handle_.promise().install_continuation(continuation, *scheduler);
-            return true;
+            return handle_.promise().install_continuation(continuation, *scheduler);
         }
 
         result_type await_resume() {
@@ -149,11 +237,20 @@ public:
             auto handle = std::exchange(handle_, {});
             result_type result = handle.promise().take_result();
             handle.destroy();
+            detach();
             return result;
         }
 
     private:
+        void detach() noexcept {
+            if (continuation_state_) {
+                continuation_state_->detach();
+                continuation_state_.reset();
+            }
+        }
+
         handle_type handle_{};
+        std::shared_ptr<detail::task_continuation_state> continuation_state_{};
     };
 
     awaiter operator co_await() && noexcept {
@@ -174,10 +271,9 @@ private:
 template<class T>
 struct task<T>::promise_type {
     std::optional<scheduler_ref> creation_scheduler{current_scheduler()};
-    std::optional<scheduler_ref> continuation_scheduler{};
-    std::coroutine_handle<> continuation{};
+    std::shared_ptr<detail::task_continuation_state> continuation_state{
+        std::make_shared<detail::task_continuation_state>()};
     std::optional<result_type> result{};
-    bool consumed{false};
 
     task get_return_object() noexcept {
         return task(handle_type::from_promise(*this));
@@ -205,21 +301,20 @@ struct task<T>::promise_type {
     }
 
     [[nodiscard]] bool has_result() const noexcept {
-        return result.has_value();
+        return continuation_state->is_completed();
     }
 
-    void install_continuation(std::coroutine_handle<> next, scheduler_ref scheduler) {
-        if (consumed) {
+    [[nodiscard]] bool install_continuation(std::coroutine_handle<> next, scheduler_ref scheduler) {
+        const auto installed = continuation_state->install(next, scheduler);
+        if (installed == detail::task_continuation_install_result::already_consumed) {
             set_invalid_state("task awaited more than once");
-            return;
+            return false;
         }
-        consumed = true;
-        continuation = next;
-        continuation_scheduler = scheduler;
+        return installed == detail::task_continuation_install_result::suspend;
     }
 
     result_type take_result() {
-        if (!result.has_value()) {
+        if (!has_result() || !result.has_value()) {
             return detail::invalid_result<result_type>("task has not completed");
         }
         return std::move(*result);
@@ -229,6 +324,7 @@ struct task<T>::promise_type {
         if (!result.has_value()) {
             result.emplace(std::unexpected(make_error(vio_error_code::invalid_state,
                                                       std::move(diagnostic))));
+            continuation_state->mark_completed();
         }
     }
 };
@@ -278,16 +374,17 @@ public:
 
     class awaiter {
     public:
-        explicit awaiter(handle_type handle) noexcept
-            : handle_(handle) {}
+        explicit awaiter(handle_type handle) noexcept;
 
         awaiter(const awaiter&) = delete;
         awaiter& operator=(const awaiter&) = delete;
 
         awaiter(awaiter&& other) noexcept
-            : handle_(std::exchange(other.handle_, {})) {}
+            : handle_(std::exchange(other.handle_, {})),
+              continuation_state_(std::move(other.continuation_state_)) {}
 
         ~awaiter() {
+            detach();
             if (handle_) {
                 handle_.destroy();
             }
@@ -298,7 +395,15 @@ public:
         result_type await_resume();
 
     private:
+        void detach() noexcept {
+            if (continuation_state_) {
+                continuation_state_->detach();
+                continuation_state_.reset();
+            }
+        }
+
         handle_type handle_{};
+        std::shared_ptr<detail::task_continuation_state> continuation_state_{};
     };
 
     awaiter operator co_await() && noexcept {
@@ -318,10 +423,9 @@ private:
 
 struct task<void>::promise_type {
     std::optional<scheduler_ref> creation_scheduler{current_scheduler()};
-    std::optional<scheduler_ref> continuation_scheduler{};
-    std::coroutine_handle<> continuation{};
+    std::shared_ptr<detail::task_continuation_state> continuation_state{
+        std::make_shared<detail::task_continuation_state>()};
     std::optional<result_type> result{};
-    bool consumed{false};
 
     task get_return_object() noexcept {
         return task(handle_type::from_promise(*this));
@@ -345,21 +449,20 @@ struct task<void>::promise_type {
     }
 
     [[nodiscard]] bool has_result() const noexcept {
-        return result.has_value();
+        return continuation_state->is_completed();
     }
 
-    void install_continuation(std::coroutine_handle<> next, scheduler_ref scheduler) {
-        if (consumed) {
+    [[nodiscard]] bool install_continuation(std::coroutine_handle<> next, scheduler_ref scheduler) {
+        const auto installed = continuation_state->install(next, scheduler);
+        if (installed == detail::task_continuation_install_result::already_consumed) {
             set_invalid_state("task awaited more than once");
-            return;
+            return false;
         }
-        consumed = true;
-        continuation = next;
-        continuation_scheduler = scheduler;
+        return installed == detail::task_continuation_install_result::suspend;
     }
 
     result_type take_result() {
-        if (!result.has_value()) {
+        if (!has_result() || !result.has_value()) {
             return detail::invalid_result<result_type>("task has not completed");
         }
         return std::move(*result);
@@ -369,6 +472,7 @@ struct task<void>::promise_type {
         if (!result.has_value()) {
             result.emplace(std::unexpected(make_error(vio_error_code::invalid_state,
                                                       std::move(diagnostic))));
+            continuation_state->mark_completed();
         }
     }
 };
@@ -388,6 +492,10 @@ inline bool task<void>::is_ready() const noexcept {
     return !handle_ || handle_.promise().has_result();
 }
 
+inline task<void>::awaiter::awaiter(task<void>::handle_type handle) noexcept
+    : handle_(handle),
+      continuation_state_(handle ? handle.promise().continuation_state : nullptr) {}
+
 inline bool task<void>::awaiter::await_ready() const noexcept {
     return !handle_ || handle_.promise().has_result();
 }
@@ -399,8 +507,7 @@ inline bool task<void>::awaiter::await_suspend(std::coroutine_handle<> continuat
         return false;
     }
 
-    handle_.promise().install_continuation(continuation, *scheduler);
-    return true;
+    return handle_.promise().install_continuation(continuation, *scheduler);
 }
 
 inline task<void>::result_type task<void>::awaiter::await_resume() {
@@ -411,6 +518,7 @@ inline task<void>::result_type task<void>::awaiter::await_resume() {
     auto handle = std::exchange(handle_, {});
     result_type result = handle.promise().take_result();
     handle.destroy();
+    detach();
     return result;
 }
 

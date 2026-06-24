@@ -33,6 +33,9 @@ The source baseline is C++23. Public headers may use concepts, `std::expected`, 
 - `shared_*` explicitly extends lifetime; hot paths may use intrusive reference counting.
 - `handle` is move-only and closes on destruction.
 - Every view documents invalidation conditions.
+- Public task owners are move-only and are not thread-safe unless a specific API
+  documents otherwise. Destruction, moves, result extraction, and awaiter resume
+  are confined to the owning scheduler/shard or must be externally synchronized.
 
 ## Asynchronous Behavior
 
@@ -42,6 +45,9 @@ Asynchronous APIs return VIO tasks and preserve the owner scheduler.
 - Cancellation is a request with defined completion semantics, not permission to destroy live operation state.
 - Deadlines use a monotonic clock.
 - A public task cannot silently outlive its owning scope.
+- Cross-thread task ownership transfer must be explicit through a scheduler or
+  ownership-transfer API; callers must not race task owner destruction with a
+  scheduler continuation that can resume the same frame.
 
 ## Buffers
 

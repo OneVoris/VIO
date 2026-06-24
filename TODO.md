@@ -21,7 +21,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M1-004** Write an ADR for the exactly-once operation-completion state machine.
 - [x] **VIO-M1-005** Implement `async_scope::spawn`, `join`, and `request_stop`.
 - [x] **VIO-M1-006** Implement scope error aggregation and a background-task error sink.
-- [ ] **VIO-M1-007** Implement `when_all`.
+- [x] **VIO-M1-007** Implement `when_all`.
 - [ ] **VIO-M1-008** Implement `when_any` and define cancellation and observation of losing operations.
 - [ ] **VIO-M1-009** Add stress tests for cancellation before submit, during completion, and after completion.
 
