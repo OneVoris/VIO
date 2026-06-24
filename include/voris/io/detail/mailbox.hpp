@@ -1,6 +1,9 @@
 #pragma once
 
+#include <optional>
+
 #include <voris/io/detail/bounded_queue.hpp>
+#include <voris/io/loop_budget.hpp>
 #include <voris/io/scheduler.hpp>
 
 namespace voris::io::detail {
@@ -20,10 +23,7 @@ public:
     }
 
     [[nodiscard]] bool run_one() {
-        auto next = system_queue_.pop();
-        if (!next.has_value()) {
-            next = queue_.pop();
-        }
+        auto next = pop_next();
         if (!next.has_value()) {
             return false;
         }
@@ -31,6 +31,22 @@ public:
             (*next)();
         }
         return true;
+    }
+
+    [[nodiscard]] std::size_t run_for_budget(loop_budget_slice& budget) {
+        std::size_t ran = 0;
+        while (budget.remaining_tasks() > 0) {
+            auto next = pop_next();
+            if (!next.has_value()) {
+                break;
+            }
+            (void)budget.consume_task();
+            if (*next) {
+                (*next)();
+            }
+            ++ran;
+        }
+        return ran;
     }
 
     [[nodiscard]] std::size_t run_until_idle() {
@@ -63,6 +79,14 @@ public:
     }
 
 private:
+    [[nodiscard]] std::optional<continuation> pop_next() {
+        auto next = system_queue_.pop();
+        if (!next.has_value()) {
+            next = queue_.pop();
+        }
+        return next;
+    }
+
     static constexpr std::size_t system_capacity_for(std::size_t user_capacity) noexcept {
         return user_capacity;
     }

@@ -8,6 +8,7 @@
 
 #include <voris/io/backend_wakeup.hpp>
 #include <voris/io/detail/mailbox.hpp>
+#include <voris/io/loop_budget.hpp>
 #include <voris/io/runtime_metrics.hpp>
 #include <voris/io/scheduler.hpp>
 
@@ -15,7 +16,7 @@ namespace voris::io {
 
 class shard {
 public:
-    explicit shard(std::size_t queue_limit = 1024);
+    explicit shard(std::size_t queue_limit = 1024, loop_budget budget = {});
     ~shard();
 
     shard(const shard&) = delete;
@@ -26,6 +27,9 @@ public:
     [[nodiscard]] void_result submit(continuation next);
     [[nodiscard]] void_result submit_system(continuation next);
     [[nodiscard]] std::size_t drain();
+
+    // Runs one nonblocking scheduler-loop iteration for manual drivers and deterministic tests.
+    [[nodiscard]] io_result<std::size_t> run_one_loop_iteration();
 
     void start();
     void request_stop();
@@ -46,6 +50,7 @@ private:
     void run_loop();
 
     detail::mailbox mailbox_;
+    loop_budget budget_;
     backend_wakeup wakeup_;
     runtime_metrics metrics_;
     mutable std::mutex metrics_mutex_;

@@ -4,8 +4,9 @@
 
 namespace voris::io {
 
-shard::shard(std::size_t queue_limit)
-    : mailbox_(queue_limit) {}
+shard::shard(std::size_t queue_limit, loop_budget budget)
+    : mailbox_(queue_limit),
+      budget_(budget) {}
 
 shard::~shard() {
     request_stop();
@@ -60,6 +61,21 @@ std::size_t shard::drain() {
     return ran;
 }
 
+io_result<std::size_t> shard::run_one_loop_iteration() {
+    auto slice = loop_budget_slice::create(budget_);
+    if (!slice.has_value()) {
+        return std::unexpected(slice.error());
+    }
+
+    const std::size_t ran = mailbox_.run_for_budget(*slice);
+    {
+        std::lock_guard lock(metrics_mutex_);
+        metrics_.completed_tasks += ran;
+        metrics_.queue_depth = mailbox_.size();
+    }
+    return ran;
+}
+
 void shard::start() {
     if (running_.exchange(true)) {
         return;
@@ -97,7 +113,12 @@ void shard::run_loop() {
     thread_id_ = std::this_thread::get_id();
     current_scheduler_scope scope(scheduler());
     while (!stop_requested_) {
-        if (drain() == 0) {
+        auto ran = run_one_loop_iteration();
+        if (!ran.has_value()) {
+            stop_requested_ = true;
+            break;
+        }
+        if (*ran == 0) {
             wakeup_.wait();
             (void)wakeup_.consume_all();
         }

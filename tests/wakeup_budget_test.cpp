@@ -1,4 +1,5 @@
 #include <voris/io/backend_wakeup.hpp>
+#include <voris/io/detail/mailbox.hpp>
 #include <voris/io/loop_budget.hpp>
 #include <voris/io/shard.hpp>
 
@@ -162,6 +163,122 @@ int main() {
     assert(budget.task_budget > 0);
     assert(budget.completion_budget > 0);
     assert(budget.timer_budget > 0);
+    assert(budget.validate().has_value());
+
+    {
+        loop_budget invalid_task{.task_budget = 0, .completion_budget = 1, .timer_budget = 1};
+        auto result = invalid_task.validate();
+        assert(!result.has_value());
+        assert(result.error().classification == vio_error_code::invalid_state);
+
+        loop_budget invalid_completion{.task_budget = 1,
+                                       .completion_budget = 0,
+                                       .timer_budget = 1};
+        result = invalid_completion.validate();
+        assert(!result.has_value());
+        assert(result.error().classification == vio_error_code::invalid_state);
+
+        loop_budget invalid_timer{.task_budget = 1, .completion_budget = 1, .timer_budget = 0};
+        result = invalid_timer.validate();
+        assert(!result.has_value());
+        assert(result.error().classification == vio_error_code::invalid_state);
+
+        auto slice = loop_budget_slice::create(invalid_timer);
+        assert(!slice.has_value());
+        assert(slice.error().classification == vio_error_code::invalid_state);
+    }
+
+    {
+        auto slice_result =
+            loop_budget_slice::create(loop_budget{.task_budget = 2,
+                                                  .completion_budget = 1,
+                                                  .timer_budget = 3});
+        assert(slice_result.has_value());
+        auto slice = *slice_result;
+
+        assert(slice.remaining_tasks() == 2);
+        assert(slice.remaining_completions() == 1);
+        assert(slice.remaining_timers() == 3);
+
+        assert(slice.consume_task());
+        assert(slice.consume_task());
+        assert(!slice.consume_task());
+        assert(slice.consumed_tasks() == 2);
+        assert(slice.remaining_tasks() == 0);
+
+        assert(slice.consume_completion());
+        assert(!slice.consume_completion());
+        assert(slice.consumed_completions() == 1);
+        assert(slice.remaining_completions() == 0);
+
+        assert(slice.consume_timer());
+        assert(slice.consume_timer());
+        assert(slice.consume_timer());
+        assert(!slice.consume_timer());
+        assert(slice.consumed_timers() == 3);
+        assert(slice.remaining_timers() == 0);
+    }
+
+    {
+        detail::mailbox budgeted(4);
+        std::vector<int> order;
+        assert(budgeted.submit([&order] { order.push_back(1); }).has_value());
+        assert(budgeted.submit([&order] { order.push_back(2); }).has_value());
+        assert(budgeted.submit([&order] { order.push_back(3); }).has_value());
+
+        auto first_slice =
+            loop_budget_slice::create(loop_budget{.task_budget = 2,
+                                                  .completion_budget = 8,
+                                                  .timer_budget = 8});
+        assert(first_slice.has_value());
+        assert(budgeted.run_for_budget(*first_slice) == 2);
+        assert(order == std::vector<int>({1, 2}));
+        assert(first_slice->consumed_tasks() == 2);
+
+        auto second_slice =
+            loop_budget_slice::create(loop_budget{.task_budget = 2,
+                                                  .completion_budget = 8,
+                                                  .timer_budget = 8});
+        assert(second_slice.has_value());
+        assert(budgeted.run_for_budget(*second_slice) == 1);
+        assert(order == std::vector<int>({1, 2, 3}));
+        assert(second_slice->consumed_tasks() == 1);
+    }
+
+    {
+        shard worker(4, loop_budget{.task_budget = 2, .completion_budget = 8, .timer_budget = 8});
+        std::vector<int> order;
+        assert(worker.submit([&order] { order.push_back(1); }).has_value());
+        assert(worker.submit([&order] { order.push_back(2); }).has_value());
+        assert(worker.submit([&order] { order.push_back(3); }).has_value());
+
+        auto first_turn = worker.run_one_loop_iteration();
+        assert(first_turn.has_value());
+        assert(*first_turn == 2);
+        assert(order == std::vector<int>({1, 2}));
+
+        auto second_turn = worker.run_one_loop_iteration();
+        assert(second_turn.has_value());
+        assert(*second_turn == 1);
+        assert(order == std::vector<int>({1, 2, 3}));
+    }
+
+    {
+        shard worker(4, loop_budget{.task_budget = 1, .completion_budget = 8, .timer_budget = 8});
+        std::vector<int> order;
+        assert(worker.submit([&order] { order.push_back(2); }).has_value());
+        assert(worker.submit_system([&order] { order.push_back(1); }).has_value());
+
+        auto first_turn = worker.run_one_loop_iteration();
+        assert(first_turn.has_value());
+        assert(*first_turn == 1);
+        assert(order == std::vector<int>({1}));
+
+        auto second_turn = worker.run_one_loop_iteration();
+        assert(second_turn.has_value());
+        assert(*second_turn == 1);
+        assert(order == std::vector<int>({1, 2}));
+    }
 
     return 0;
 }
