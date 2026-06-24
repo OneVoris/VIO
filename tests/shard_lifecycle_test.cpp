@@ -3,6 +3,7 @@
 
 #include "test_assert.hpp"
 #include <atomic>
+#include <vector>
 
 int main() {
     using namespace voris::io;
@@ -44,6 +45,15 @@ int main() {
     assert(trampoline_rejected.error().classification == vio_error_code::resource_exhausted);
     assert(trampoline_saturated.drain() == 1);
     assert(trampoline_scheduled == 1);
+
+    shard system_saturated(1);
+    std::vector<int> system_order;
+    assert(system_saturated.submit([&system_order] { system_order.push_back(2); }).has_value());
+    assert(trampoline::schedule_system(system_saturated.scheduler(),
+                                       [&system_order] { system_order.push_back(1); })
+               .has_value());
+    assert(system_saturated.drain() == 2);
+    assert(system_order == std::vector<int>({1, 2}));
 
     default_scheduler local;
     int default_ran = 0;

@@ -33,6 +33,18 @@ void_result shard::submit(continuation next) {
     return result;
 }
 
+void_result shard::submit_system(continuation next) {
+    auto result = mailbox_.submit_system(std::move(next));
+    {
+        std::lock_guard lock(metrics_mutex_);
+        metrics_.queue_depth = mailbox_.size();
+        if (result.has_value()) {
+            ++metrics_.submitted_tasks;
+        }
+    }
+    return result;
+}
+
 std::size_t shard::drain() {
     const std::size_t ran = mailbox_.run_until_idle();
     {

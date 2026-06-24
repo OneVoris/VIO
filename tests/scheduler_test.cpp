@@ -76,6 +76,10 @@ int main() {
     assert(scheduler.run_until_idle() >= 1);
     assert(order == std::vector<int>({1, 2, 3, 4, 5}));
 
+    assert(ref.schedule_system([&order] { order.push_back(6); }).has_value());
+    assert(scheduler.run_one());
+    assert(order == std::vector<int>({1, 2, 3, 4, 5, 6}));
+
     inline_scheduler inline_target;
     scheduler_ref inline_ref(inline_target);
     int count = 0;

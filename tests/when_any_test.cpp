@@ -1,4 +1,6 @@
 #include <voris/io/when_any.hpp>
+#include <voris/io/shard.hpp>
+#include <voris/io/trampoline.hpp>
 
 #include "test_assert.hpp"
 #include <coroutine>
@@ -115,6 +117,81 @@ public:
 
 private:
     voris::io::scheduler_ref scheduler_;
+    std::shared_ptr<operation_state> state_;
+};
+
+class inline_gate {
+    struct operation_state {
+        std::coroutine_handle<> continuation{};
+        bool ready{false};
+        bool detached{false};
+    };
+
+public:
+    inline_gate()
+        : state_(std::make_shared<operation_state>()) {}
+
+    void complete() const {
+        state_->ready = true;
+        if (state_->detached || !state_->continuation) {
+            return;
+        }
+
+        auto continuation = state_->continuation;
+        state_->continuation = {};
+        continuation.resume();
+    }
+
+    class awaiter {
+    public:
+        explicit awaiter(std::shared_ptr<operation_state> state) noexcept
+            : state_(std::move(state)) {}
+
+        awaiter(const awaiter&) = delete;
+        awaiter& operator=(const awaiter&) = delete;
+
+        awaiter(awaiter&& other) noexcept
+            : state_(std::move(other.state_)) {}
+
+        awaiter& operator=(awaiter&& other) noexcept {
+            if (this != &other) {
+                detach();
+                state_ = std::move(other.state_);
+            }
+            return *this;
+        }
+
+        ~awaiter() {
+            detach();
+        }
+
+        [[nodiscard]] bool await_ready() const noexcept {
+            return state_->ready;
+        }
+
+        [[nodiscard]] bool await_suspend(std::coroutine_handle<> continuation) const {
+            state_->continuation = continuation;
+            return true;
+        }
+
+        void await_resume() const noexcept {}
+
+    private:
+        void detach() noexcept {
+            if (state_ != nullptr) {
+                state_->continuation = {};
+                state_->detached = true;
+            }
+        }
+
+        std::shared_ptr<operation_state> state_;
+    };
+
+    awaiter operator co_await() const {
+        return awaiter(state_);
+    }
+
+private:
     std::shared_ptr<operation_state> state_;
 };
 
@@ -287,6 +364,11 @@ voris::io::task<int> value_task(int value) {
 }
 
 voris::io::task<int> gated_value(manual_gate& gate, int value) {
+    co_await gate;
+    co_return value;
+}
+
+voris::io::task<int> inline_gated_value(inline_gate& gate, int value) {
     co_await gate;
     co_return value;
 }
@@ -540,6 +622,62 @@ int main() {
 
         assert(scheduler.run_until_idle() >= 1);
         assert(!parent_resumed);
+    }
+
+    {
+        shard saturated(1);
+        inline_gate winner_gate;
+        inline_gate loser_gate;
+        cancellation_source losers;
+        current_scheduler_scope shard_scope(saturated.scheduler());
+        auto any = when_any(losers,
+                            inline_gated_value(winner_gate, 61),
+                            inline_gated_value(loser_gate, 62));
+        assert(!any.is_ready());
+        assert(saturated.submit([] {}).has_value());
+
+        winner_gate.complete();
+        assert(!any.is_ready());
+        assert(saturated.drain() >= 1);
+        assert(losers.cancellation_requested());
+        assert(!any.is_ready());
+
+        loser_gate.complete();
+        assert(saturated.drain() >= 1);
+        assert(any.is_ready());
+
+        auto result = std::move(any).take_result();
+        assert(result.has_value());
+        assert(result->index == 0);
+        assert(std::get<0>(result->result).has_value());
+        assert(*std::get<0>(result->result) == 61);
+    }
+
+    {
+        shard saturated(1);
+        inline_gate winner_gate;
+        inline_gate loser_gate;
+        cancellation_source losers;
+        current_scheduler_scope shard_scope(saturated.scheduler());
+        auto any = when_any(losers,
+                            inline_gated_value(winner_gate, 71),
+                            inline_gated_value(loser_gate, 72));
+        assert(!any.is_ready());
+        assert(trampoline::schedule_system(saturated.scheduler(), [] {}).has_value());
+
+        winner_gate.complete();
+        assert(losers.cancellation_requested());
+        assert(!any.is_ready());
+
+        loser_gate.complete();
+        assert(any.is_ready());
+
+        auto result = std::move(any).take_result();
+        assert(result.has_value());
+        assert(result->index == 0);
+        assert(std::get<0>(result->result).has_value());
+        assert(*std::get<0>(result->result) == 71);
+        assert(saturated.drain() == 1);
     }
 
     {

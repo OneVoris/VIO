@@ -43,4 +43,10 @@ void_result trampoline::schedule(scheduler_ref scheduler, continuation next) {
     });
 }
 
+void_result trampoline::schedule_system(scheduler_ref scheduler, continuation next) {
+    return scheduler.schedule_system([next = std::move(next)] mutable {
+        run_continuation(std::move(next));
+    });
+}
+
 } // namespace voris::io

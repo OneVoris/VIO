@@ -22,6 +22,7 @@ public:
     [[nodiscard]] scheduler_ref scheduler() noexcept;
     [[nodiscard]] void_result enqueue(continuation next);
     [[nodiscard]] void_result submit(continuation next);
+    [[nodiscard]] void_result submit_system(continuation next);
     [[nodiscard]] std::size_t drain();
 
     void start();

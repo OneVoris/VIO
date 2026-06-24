@@ -91,6 +91,17 @@ struct task_continuation_state {
     }
 };
 
+inline void resume_task_continuation(std::shared_ptr<task_continuation_state> state) {
+    std::coroutine_handle<> continuation{};
+    scheduler_ref scheduler{};
+    if (!state || !state->claim(continuation, scheduler)) {
+        return;
+    }
+
+    current_scheduler_scope scope(scheduler);
+    continuation.resume();
+}
+
 template<class Promise>
 class task_initial_awaiter {
 public:
@@ -126,19 +137,15 @@ public:
             return;
         }
 
-        auto scheduled = trampoline::schedule(*scheduler, [state = std::move(state)] {
-            std::coroutine_handle<> continuation{};
-            scheduler_ref scheduler{};
-            if (!state->claim(continuation, scheduler)) {
-                return;
-            }
-
-            current_scheduler_scope scope(scheduler);
-            continuation.resume();
+        auto fallback_state = state;
+        auto scheduled = trampoline::schedule_system(*scheduler, [state = std::move(state)] {
+            resume_task_continuation(std::move(state));
         });
         if (!scheduled.has_value()) {
-            // TODO(M2/M8): reserve system continuation capacity so final_suspend can report
-            // deterministic scheduling failure instead of leaving the awaiter suspended.
+            // The reserved lane should normally accept runtime continuations. If that
+            // lane is exhausted too, resume deterministically instead of stranding the
+            // awaiting coroutine forever.
+            resume_task_continuation(std::move(fallback_state));
         }
     }
 

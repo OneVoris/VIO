@@ -70,12 +70,14 @@ public:
 
         if (scheduler.has_value()) {
             auto state = this->shared_from_this();
-            auto scheduled = trampoline::schedule(*scheduler, [state = std::move(state)] {
+            auto fallback_state = state;
+            auto scheduled = trampoline::schedule_system(*scheduler, [state = std::move(state)] {
                 state->resume_parent();
             });
             if (!scheduled.has_value()) {
-                // TODO(M2/M8): reserve system continuation capacity so winner publication can
-                // deterministically wake or fail the parent when its scheduler is saturated.
+                // The reserved lane protects parent wakeups from user-queue saturation. If it
+                // is exhausted too, resume after releasing state locks rather than hanging.
+                fallback_state->resume_parent();
             }
         }
     }

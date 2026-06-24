@@ -1,6 +1,10 @@
 #include <voris/io/task.hpp>
+#include <voris/io/shard.hpp>
+#include <voris/io/trampoline.hpp>
 
 #include "test_assert.hpp"
+#include <coroutine>
+#include <memory>
 #include <stdexcept>
 
 namespace {
@@ -40,6 +44,86 @@ voris::io::task<int> scheduled_value(voris::io::scheduler_ref scheduler, int val
 
 voris::io::task<int> awaiting_parent(voris::io::scheduler_ref scheduler) {
     auto child = co_await scheduled_value(scheduler, 41);
+    if (!child.has_value()) {
+        co_return child;
+    }
+    co_return *child + 1;
+}
+
+class inline_gate {
+    struct operation_state {
+        std::coroutine_handle<> continuation{};
+        bool ready{false};
+        bool detached{false};
+    };
+
+public:
+    inline_gate()
+        : state_(std::make_shared<operation_state>()) {}
+
+    void complete() const {
+        state_->ready = true;
+        if (state_->detached || !state_->continuation) {
+            return;
+        }
+
+        auto continuation = state_->continuation;
+        state_->continuation = {};
+        continuation.resume();
+    }
+
+    class awaiter {
+    public:
+        explicit awaiter(std::shared_ptr<operation_state> state) noexcept
+            : state_(std::move(state)) {}
+
+        awaiter(const awaiter&) = delete;
+        awaiter& operator=(const awaiter&) = delete;
+
+        awaiter(awaiter&& other) noexcept
+            : state_(std::move(other.state_)) {}
+
+        ~awaiter() {
+            detach();
+        }
+
+        [[nodiscard]] bool await_ready() const noexcept {
+            return state_->ready;
+        }
+
+        [[nodiscard]] bool await_suspend(std::coroutine_handle<> continuation) const {
+            state_->continuation = continuation;
+            return true;
+        }
+
+        void await_resume() const noexcept {}
+
+    private:
+        void detach() noexcept {
+            if (state_ != nullptr) {
+                state_->continuation = {};
+                state_->detached = true;
+            }
+        }
+
+        std::shared_ptr<operation_state> state_;
+    };
+
+    awaiter operator co_await() const {
+        return awaiter(state_);
+    }
+
+private:
+    std::shared_ptr<operation_state> state_;
+};
+
+voris::io::task<int> gated_value(inline_gate& gate, int value) {
+    co_await gate;
+    co_return value;
+}
+
+voris::io::task<int> awaiting_gated_child(inline_gate& gate) {
+    auto child = co_await gated_value(gate, 41);
     if (!child.has_value()) {
         co_return child;
     }
@@ -117,6 +201,41 @@ int main() {
         auto parent_result = std::move(parent).take_result();
         assert(parent_result.has_value());
         assert(*parent_result == 42);
+    }
+
+    {
+        shard saturated(1);
+        inline_gate gate;
+        current_scheduler_scope scope(saturated.scheduler());
+        auto parent = awaiting_gated_child(gate);
+        assert(!parent.is_ready());
+        assert(saturated.submit([] {}).has_value());
+
+        gate.complete();
+        assert(!parent.is_ready());
+        assert(saturated.drain() >= 1);
+        assert(parent.is_ready());
+
+        auto parent_result = std::move(parent).take_result();
+        assert(parent_result.has_value());
+        assert(*parent_result == 42);
+    }
+
+    {
+        shard saturated(1);
+        inline_gate gate;
+        current_scheduler_scope scope(saturated.scheduler());
+        auto parent = awaiting_gated_child(gate);
+        assert(!parent.is_ready());
+        assert(trampoline::schedule_system(saturated.scheduler(), [] {}).has_value());
+
+        gate.complete();
+        assert(parent.is_ready());
+
+        auto parent_result = std::move(parent).take_result();
+        assert(parent_result.has_value());
+        assert(*parent_result == 42);
+        assert(saturated.drain() == 1);
     }
 
     {
