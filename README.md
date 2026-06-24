@@ -95,4 +95,6 @@ VMem is required from M0 onward. VIO consumes the latest released `voris-vmem` p
 
 ## Licensing
 
-No license is selected by this scaffold. See [docs/LICENSING.md](docs/LICENSING.md) before publishing or accepting external contributions.
+VIO is distributed under GPL-3.0-only. Separate commercial licenses are available
+from the project owner. See [Licensing](docs/LICENSING.md) before publishing or
+accepting external contributions.

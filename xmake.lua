@@ -62,12 +62,14 @@ if has_config("build_tests") then
         deadline = "tests/deadline_test.cpp",
         error = "tests/error_test.cpp",
         file_io = "tests/file_io_test.cpp",
+        hardening_stress = "tests/hardening_stress_test.cpp",
         mailbox = "tests/mailbox_test.cpp",
         native_handle_registry = "tests/native_handle_registry_test.cpp",
         epoll_backend = "tests/epoll_backend_test.cpp",
         io_uring_backend = "tests/io_uring_backend_test.cpp",
         iocp_backend = "tests/iocp_backend_test.cpp",
         kqueue_backend = "tests/kqueue_backend_test.cpp",
+        e2e_overload = "tests/e2e_overload_test.cpp",
         runtime_builder = "tests/runtime_builder_test.cpp",
         runtime_metrics = "tests/runtime_metrics_test.cpp",
         scheduler = "tests/scheduler_test.cpp",
@@ -97,9 +99,34 @@ if has_config("build_tests") then
 end
 
 if has_config("build_benchmarks") then
-    target("vio_timer_heap_benchmark")
+    local benchmark_sources = {
+        timer_heap = "benchmarks/timer_heap_benchmark.cpp",
+        scheduler = "benchmarks/scheduler_benchmark.cpp",
+        channel = "benchmarks/channel_benchmark.cpp",
+    }
+
+    for name, source in pairs(benchmark_sources) do
+    target("vio_" .. name .. "_benchmark")
         set_kind("binary")
-        add_files("benchmarks/timer_heap_benchmark.cpp")
+        add_files(source)
         add_deps("voris_vio")
     target_end()
+    end
+end
+
+if has_config("build_examples") then
+    local example_sources = {
+        echo = "examples/echo.cpp",
+        fan_out = "examples/fan_out.cpp",
+        file_copy = "examples/file_copy.cpp",
+        graceful_shutdown = "examples/graceful_shutdown.cpp",
+    }
+
+    for name, source in pairs(example_sources) do
+    target("vio_example_" .. name)
+        set_kind("binary")
+        add_files(source)
+        add_deps("voris_vio")
+    target_end()
+    end
 end

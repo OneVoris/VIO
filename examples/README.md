@@ -1,3 +1,8 @@
 # Examples
 
-Examples are added with the milestone that introduces the public capability they demonstrate. Every example must be bounded, buildable, and covered by CI.
+Examples are bounded, buildable programs that exercise public VIO APIs.
+
+- `echo.cpp`
+- `fan_out.cpp`
+- `file_copy.cpp`
+- `graceful_shutdown.cpp`
