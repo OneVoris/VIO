@@ -1,0 +1,22 @@
+name: Feature request
+description: Propose a scoped public capability
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    attributes:
+      label: Problem
+      description: Describe the concrete use case and why current public APIs are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed contract
+      description: Include ownership, errors, limits, compatibility, and testing expectations.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives
+    validations:
+      required: true

@@ -1,0 +1,33 @@
+# XMake output
+.xmake/
+build/
+
+# Compiler and editor output
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+.vscode/
+.idea/
+.DS_Store
+
+# Test and analysis output
+coverage/
+corpus-artifacts/
+crash-*
+*.profraw
+*.profdata
+
+# Local AI/agent operating documents (Chinese and intentionally untracked)
+AGENTS.md
+.agent/
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+GEMINI.local.md
+.codex/

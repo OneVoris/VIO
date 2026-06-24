@@ -1,0 +1,13 @@
+schema = 1
+name = "voris-vio"
+display_name = "VIO"
+version = "0.1.0-dev"
+language = "C++23"
+xmake_minimum = "3.0.0"
+primary_target = "voris_vio"
+include_prefix = "voris/io"
+
+[[dependencies]]
+name = "voris-vmem"
+version = ">=0.1.0 <0.2.0"
+optional = false
