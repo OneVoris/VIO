@@ -37,6 +37,14 @@ public:
         return queue_.size();
     }
 
+    [[nodiscard]] std::size_t capacity() const noexcept {
+        return queue_.capacity();
+    }
+
+    [[nodiscard]] bool full() const noexcept {
+        return queue_.full();
+    }
+
     [[nodiscard]] std::size_t capacity_waiters() const noexcept {
         return queue_.capacity_waiters();
     }
