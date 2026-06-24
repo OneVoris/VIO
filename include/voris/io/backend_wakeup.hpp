@@ -20,7 +20,7 @@ public:
             std::lock_guard lock(mutex_);
             ++pending_;
         }
-        condition_.notify_one();
+        wake_condition_.notify_one();
     }
 
     [[nodiscard]] bool try_consume() {
@@ -45,10 +45,10 @@ public:
         std::unique_lock lock(mutex_);
         if (pending_ == 0) {
             ++waiters_;
-            condition_.notify_all();
-            condition_.wait(lock, [this] { return pending_ != 0; });
+            waiter_condition_.notify_all();
+            wake_condition_.wait(lock, [this] { return pending_ != 0; });
             --waiters_;
-            condition_.notify_all();
+            waiter_condition_.notify_all();
         }
         --pending_;
     }
@@ -58,11 +58,11 @@ public:
         std::unique_lock lock(mutex_);
         if (pending_ == 0) {
             ++waiters_;
-            condition_.notify_all();
+            waiter_condition_.notify_all();
             const bool signaled =
-                condition_.wait_for(lock, timeout, [this] { return pending_ != 0; });
+                wake_condition_.wait_for(lock, timeout, [this] { return pending_ != 0; });
             --waiters_;
-            condition_.notify_all();
+            waiter_condition_.notify_all();
             if (!signaled) {
                 return false;
             }
@@ -86,16 +86,18 @@ private:
         std::size_t minimum_waiters,
         const std::chrono::duration<Rep, Period>& timeout) const {
         std::unique_lock lock(mutex_);
-        return condition_.wait_for(lock, timeout,
-                                   [this, minimum_waiters] {
-                                       return waiters_ >= minimum_waiters;
-                                   });
+        return waiter_condition_.wait_for(lock, timeout,
+                                          [this, minimum_waiters] {
+                                              return waiters_ >= minimum_waiters;
+                                          });
     }
 
     friend class shard;
 
     mutable std::mutex mutex_;
-    mutable std::condition_variable condition_;
+    std::condition_variable wake_condition_;
+    // Wait-state observers use a separate CV so wake() notify_one cannot be consumed by them.
+    mutable std::condition_variable waiter_condition_;
     std::size_t pending_{0};
     std::size_t waiters_{0};
 };
