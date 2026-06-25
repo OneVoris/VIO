@@ -23,8 +23,11 @@ not expose identical cancellation and file-I/O semantics.
   requests `CancelIoEx` for active storage when possible, and keeps the storage
   alive until the original native completion is observed. Close and shutdown
   request cancellation but report active operations as `closed` only when their
-  original native completion arrives; the port is kept open during shutdown
-  while active native storage can still be referenced.
+  original native completion arrives. If an explicit cancellation reason was
+  recorded first and the provider later reports an aborted or cancelled native
+  result, the completion remains `cancelled` with that first reason rather than
+  being rewritten as `closed`. The port is kept open during shutdown while active
+  native storage can still be referenced.
 
 Cancellation is always a request. Backends that cannot stop an already-started
 file operation must report the real completion result.

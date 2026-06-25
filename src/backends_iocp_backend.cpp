@@ -387,7 +387,9 @@ void iocp_backend::complete_native_operation(operation_storage& storage,
     completion.operation_id = storage.operation.id;
 
     const bool handle_current = fallback_.is_current_handle(storage.operation.handle);
-    if (storage.close_requested || stopped_ || !handle_current) {
+    if (iocp_status_is_cancelled(internal_status) && storage.cancellation.has_value()) {
+        completion.result = cancelled_completion(*storage.cancellation);
+    } else if (storage.close_requested || stopped_ || !handle_current) {
         completion.result = closed_completion();
     } else if (iocp_status_is_cancelled(internal_status)) {
         completion.result = cancelled_completion(
