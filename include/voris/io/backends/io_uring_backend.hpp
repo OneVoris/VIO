@@ -9,9 +9,12 @@ namespace voris::io::backends {
 
 struct io_uring_capabilities {
     bool available{};
+    bool supports_read{};
+    bool supports_write{};
     bool supports_accept{};
     bool supports_connect{};
     bool supports_files{};
+    bool supports_fsync{};
     bool supports_cancel{};
     bool supports_registered_buffers{};
     bool supports_registered_files{};

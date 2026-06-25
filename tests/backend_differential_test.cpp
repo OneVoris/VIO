@@ -99,7 +99,18 @@ int main() {
     exercise_close_contract(epoll, static_cast<std::size_t>(epoll_fd.get()));
 
     auto uring_fd = make_event_fd();
-    exercise_close_contract(uring, static_cast<std::size_t>(uring_fd.get()));
+    if (uring.capabilities().available && uring.capabilities().supports_read) {
+        exercise_close_contract(uring, static_cast<std::size_t>(uring_fd.get()));
+    } else {
+        auto token = uring.register_handle(static_cast<std::size_t>(uring_fd.get()));
+        if (!uring.capabilities().available) {
+            assert(!token.has_value());
+        } else {
+            assert(token.has_value());
+            assert(!uring.submit(operation(202, *token)).has_value());
+            assert(uring.close_handle(*token).has_value());
+        }
+    }
 #else
     assert(!epoll.register_handle(1).has_value());
     assert(!uring.register_handle(1).has_value());
