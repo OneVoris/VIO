@@ -92,6 +92,24 @@ int main() {
     }
 
     {
+        compute_executor executor(2);
+        int ran = 0;
+        auto first = executor.try_reserve_capacity();
+        auto second = executor.try_reserve_capacity();
+        assert(first.has_value());
+        assert(second.has_value());
+        assert(!executor.submit([&ran] { ran += 100; }).has_value());
+
+        *first = std::move(*second);
+        second->release();
+        assert(executor.submit([&ran] { ran += 1; }).has_value());
+        assert(executor.submit_reserved(std::move(*first), [&ran] { ran += 10; }).has_value());
+        assert(executor.run_until_idle() == 2);
+        assert(ran == 11);
+        assert(executor.queued() == 0);
+    }
+
+    {
         compute_executor executor(0);
         auto rejected = executor.submit([] {});
         assert(!rejected.has_value());

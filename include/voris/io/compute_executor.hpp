@@ -25,6 +25,7 @@ class compute_executor {
     };
 
 public:
+    // Owns one reserved queue slot only; it does not execute queued work.
     class capacity_reservation {
     public:
         capacity_reservation() noexcept = default;
@@ -136,6 +137,7 @@ public:
         return capacity_reservation(state);
     }
 
+    // Consumes the reservation by value, including closed or invalid-state failures.
     [[nodiscard]] void_result submit_reserved(capacity_reservation reservation,
                                               continuation work) {
         auto state = state_;
