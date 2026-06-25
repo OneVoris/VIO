@@ -275,7 +275,7 @@ void_result io_uring_backend::submit(backend_operation operation) {
     }
 
     active_operation_ids_.insert(operation.id);
-    submission_queue_.push_back(operation);
+    submission_queue_.push_back(io_uring_backend::queued_submission{operation, std::nullopt});
     return {};
 }
 
@@ -289,6 +289,16 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
     if (!capabilities_.supports_cancel) {
         return std::unexpected(make_error(vio_error_code::unsupported,
                                           "io_uring cancellation is unavailable"));
+    }
+    const auto queued = std::ranges::find_if(
+        submission_queue_, [operation_id](const queued_submission& pending) {
+            return pending.operation.id == operation_id;
+    });
+    if (queued != submission_queue_.end()) {
+        if (!queued->cancellation.has_value()) {
+            queued->cancellation = reason;
+        }
+        return {};
     }
     return fallback_.cancel(operation_id, reason);
 }
@@ -320,6 +330,8 @@ io_result<std::size_t> io_uring_backend::poll() {
     if (!flushed.has_value()) {
         return std::unexpected(flushed.error());
     }
+    // The count is newly observed completions made drainable by this poll.
+    // Submission flushes only publish backend references and are not counted.
     return observe_completion_batch();
 }
 
@@ -367,7 +379,7 @@ void_result io_uring_backend::shutdown() {
 
     while (!submission_queue_.empty()) {
         completion_queue_.push_back(
-            backend_completion{submission_queue_.front().id, closed_completion()});
+            backend_completion{submission_queue_.front().operation.id, closed_completion()});
         submission_queue_.pop_front();
     }
 
@@ -398,16 +410,30 @@ void_result io_uring_backend::register_files(std::size_t count) {
     return {};
 }
 
+void_result io_uring_backend::submit_to_fallback(queued_submission queued) {
+    auto submitted = fallback_.submit(queued.operation);
+    if (!submitted.has_value()) {
+        active_operation_ids_.erase(queued.operation.id);
+        return submitted;
+    }
+    if (queued.cancellation.has_value()) {
+        auto cancelled = fallback_.cancel(queued.operation.id, *queued.cancellation);
+        if (!cancelled.has_value()) {
+            return cancelled;
+        }
+    }
+    return {};
+}
+
 io_result<std::size_t> io_uring_backend::flush_submission_batch() {
     const auto count = std::min(options_.submit_batch_limit, submission_queue_.size());
     std::size_t flushed = 0;
     for (; flushed < count; ++flushed) {
-        auto operation = submission_queue_.front();
+        auto queued = submission_queue_.front();
         submission_queue_.pop_front();
 
-        auto submitted = fallback_.submit(operation);
+        auto submitted = submit_to_fallback(std::move(queued));
         if (!submitted.has_value()) {
-            active_operation_ids_.erase(operation.id);
             return std::unexpected(submitted.error());
         }
     }
@@ -457,13 +483,12 @@ void_result io_uring_backend::drain_fallback_completions() {
 
 void_result io_uring_backend::flush_queued_submissions_for(backend_handle_token token) {
     for (auto iterator = submission_queue_.begin(); iterator != submission_queue_.end();) {
-        if (iterator->handle == token) {
-            const auto operation = *iterator;
+        if (iterator->operation.handle == token) {
+            auto queued = std::move(*iterator);
             iterator = submission_queue_.erase(iterator);
 
-            auto submitted = fallback_.submit(operation);
+            auto submitted = submit_to_fallback(std::move(queued));
             if (!submitted.has_value()) {
-                active_operation_ids_.erase(operation.id);
                 return submitted;
             }
             continue;

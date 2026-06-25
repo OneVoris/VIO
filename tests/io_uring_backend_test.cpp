@@ -417,11 +417,48 @@ void test_submit_validates_operation_before_queueing() {
 }
 
 void test_submission_queue_is_bounded() {
+    {
+        voris::io::backends::io_uring_backend backend(
+            core_capabilities(), voris::io::backends::io_uring_backend_options{
+                                     .submission_queue_capacity = 0,
+                                     .submit_batch_limit = 2,
+                                     .completion_batch_limit = 2,
+                                 });
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+        assert_void_error(backend.submit(operation(1, voris::io::backend_operation_kind::read,
+                                                   *token)),
+                          voris::io::vio_error_code::resource_exhausted);
+        assert(backend.shutdown().has_value());
+    }
+
+    {
+        voris::io::backends::io_uring_backend backend(
+            core_capabilities(), voris::io::backends::io_uring_backend_options{
+                                     .submission_queue_capacity = 2,
+                                     .submit_batch_limit = 2,
+                                     .completion_batch_limit = 2,
+                                 });
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+
+        assert(backend.submit(operation(1, voris::io::backend_operation_kind::read, *token))
+                   .has_value());
+        assert(backend.submit(operation(2, voris::io::backend_operation_kind::read, *token))
+                   .has_value());
+        assert_void_error(backend.submit(operation(3, voris::io::backend_operation_kind::read,
+                                                   *token)),
+                          voris::io::vio_error_code::resource_exhausted);
+        assert(backend.shutdown().has_value());
+    }
+}
+
+void test_queued_operation_can_be_cancelled_before_flush() {
     voris::io::backends::io_uring_backend backend(
         core_capabilities(), voris::io::backends::io_uring_backend_options{
-                                 .submission_queue_capacity = 2,
-                                 .submit_batch_limit = 2,
-                                 .completion_batch_limit = 2,
+                                 .submission_queue_capacity = 4,
+                                 .submit_batch_limit = 1,
+                                 .completion_batch_limit = 4,
                              });
     const auto token = backend.register_handle(1);
     assert(token.has_value());
@@ -430,10 +467,29 @@ void test_submission_queue_is_bounded() {
                .has_value());
     assert(backend.submit(operation(2, voris::io::backend_operation_kind::read, *token))
                .has_value());
-    assert_void_error(backend.submit(operation(3, voris::io::backend_operation_kind::read,
-                                               *token)),
-                      voris::io::vio_error_code::resource_exhausted);
-    assert(backend.shutdown().has_value());
+
+    assert(backend.cancel(2, voris::io::cancellation_reason::manual).has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert(backend.cancel(1, voris::io::cancellation_reason::manual).has_value());
+
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+
+    assert(backend.close_handle(*token).has_value());
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 2);
+
+    std::array<voris::io::backend_completion, 2> completions{};
+    const auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 2);
+    assert_completion_error(completions[0], 1, voris::io::vio_error_code::closed);
+    assert_completion_error(completions[1], 2, voris::io::vio_error_code::closed);
 }
 
 void test_poll_flushes_submissions_in_batches() {
@@ -460,14 +516,14 @@ void test_poll_flushes_submissions_in_batches() {
 
     auto polled = backend.poll();
     assert(polled.has_value());
+    assert(*polled == 0);
     assert(backend.cancel(1, voris::io::cancellation_reason::manual).has_value());
     assert(backend.cancel(2, voris::io::cancellation_reason::manual).has_value());
-    assert_void_error(backend.cancel(3, voris::io::cancellation_reason::manual),
-                      voris::io::vio_error_code::invalid_state);
+    assert(backend.cancel(3, voris::io::cancellation_reason::manual).has_value());
 
     polled = backend.poll();
     assert(polled.has_value());
-    assert(backend.cancel(3, voris::io::cancellation_reason::manual).has_value());
+    assert(*polled == 0);
     assert(backend.shutdown().has_value());
 }
 
@@ -490,6 +546,7 @@ void test_poll_observes_completions_in_batches_and_drain_preserves_order() {
 
     auto polled = backend.poll();
     assert(polled.has_value());
+    assert(*polled == 0);
 
     assert(backend.close_handle(*token).has_value());
 
@@ -546,6 +603,7 @@ void test_shutdown_closes_queued_and_pending_operations() {
 
     auto polled = backend.poll();
     assert(polled.has_value());
+    assert(*polled == 0);
 
     assert(backend.shutdown().has_value());
     assert(backend.state() == voris::io::backends::io_uring_backend_state::closed);
@@ -624,6 +682,7 @@ int main() {
     test_empty_completion_drain_is_invalid_state();
     test_submit_validates_operation_before_queueing();
     test_submission_queue_is_bounded();
+    test_queued_operation_can_be_cancelled_before_flush();
     test_poll_flushes_submissions_in_batches();
     test_poll_observes_completions_in_batches_and_drain_preserves_order();
     test_shutdown_closes_queued_and_pending_operations();

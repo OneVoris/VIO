@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <optional>
 #include <unordered_set>
 
 #include <voris/io/backend.hpp>
@@ -63,6 +64,12 @@ public:
     [[nodiscard]] void_result register_files(std::size_t count);
 
 private:
+    struct queued_submission {
+        backend_operation operation{};
+        std::optional<cancellation_reason> cancellation{};
+    };
+
+    [[nodiscard]] void_result submit_to_fallback(queued_submission queued);
     [[nodiscard]] io_result<std::size_t> flush_submission_batch();
     [[nodiscard]] io_result<std::size_t> observe_completion_batch();
     [[nodiscard]] void_result drain_fallback_completions();
@@ -71,7 +78,7 @@ private:
     io_uring_capabilities capabilities_;
     io_uring_backend_options options_;
     virtual_backend fallback_;
-    std::deque<backend_operation> submission_queue_{};
+    std::deque<queued_submission> submission_queue_{};
     std::deque<backend_completion> completion_queue_{};
     std::unordered_set<std::size_t> active_operation_ids_{};
     std::size_t registered_buffers_{0};
