@@ -642,7 +642,7 @@ void_result io_uring_backend::submit(backend_operation operation) {
     }
 
     active_operation_ids_.insert(operation.id);
-    submission_queue_.push_back(io_uring_backend::queued_submission{operation, std::nullopt});
+    submission_queue_.push_back(io_uring_backend::queued_submission{operation});
     return {};
 }
 
@@ -662,15 +662,9 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
             return pending.operation.id == operation_id;
     });
     if (queued != submission_queue_.end()) {
-        if (use_kernel_submission()) {
-            completion_queue_.push_back(
-                backend_completion{queued->operation.id, cancelled_completion(reason)});
-            submission_queue_.erase(queued);
-            return {};
-        }
-        if (!queued->cancellation.has_value()) {
-            queued->cancellation = reason;
-        }
+        completion_queue_.push_back(
+            backend_completion{queued->operation.id, cancelled_completion(reason)});
+        submission_queue_.erase(queued);
         return {};
     }
     if (use_kernel_submission()) {
@@ -891,12 +885,6 @@ void_result io_uring_backend::submit_to_fallback(queued_submission queued) {
         active_operation_ids_.erase(queued.operation.id);
         return submitted;
     }
-    if (queued.cancellation.has_value()) {
-        auto cancelled = fallback_.cancel(queued.operation.id, *queued.cancellation);
-        if (!cancelled.has_value()) {
-            return cancelled;
-        }
-    }
     return {};
 }
 
@@ -904,11 +892,6 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
     const backend_operation& operation = queued.operation;
     if (auto valid = validate_kernel_operation(operation); !valid.has_value()) {
         return valid;
-    }
-    if (queued.cancellation.has_value()) {
-        completion_queue_.push_back(
-            backend_completion{operation.id, cancelled_completion(*queued.cancellation)});
-        return {};
     }
 
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)

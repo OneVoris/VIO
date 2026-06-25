@@ -112,7 +112,6 @@ public:
 private:
     struct queued_submission {
         backend_operation operation{};
-        std::optional<cancellation_reason> cancellation{};
     };
     struct kernel_operation {
         backend_operation operation{};

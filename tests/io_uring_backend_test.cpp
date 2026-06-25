@@ -1504,6 +1504,9 @@ void test_queued_operation_can_be_cancelled_before_flush() {
                .has_value());
 
     assert(backend.cancel(2, voris::io::cancellation_reason::manual).has_value());
+    assert_void_error(backend.submit(operation(2, voris::io::backend_operation_kind::read,
+                                               *token)),
+                      voris::io::vio_error_code::invalid_state);
 
     auto polled = backend.poll();
     assert(polled.has_value());
@@ -1517,14 +1520,21 @@ void test_queued_operation_can_be_cancelled_before_flush() {
     assert(backend.close_handle(*token).has_value());
     polled = backend.poll();
     assert(polled.has_value());
-    assert(*polled == 2);
+    assert(*polled == 1);
 
     std::array<voris::io::backend_completion, 2> completions{};
     const auto drained = backend.drain_completions(completions);
     assert(drained.has_value());
     assert(*drained == 2);
-    assert_completion_error(completions[0], 1, voris::io::vio_error_code::closed);
-    assert_completion_error(completions[1], 2, voris::io::vio_error_code::closed);
+    assert_completion_error(completions[0], 2, voris::io::vio_error_code::cancelled);
+    assert_completion_error(completions[1], 1, voris::io::vio_error_code::closed);
+
+    const auto new_token = backend.register_handle(2);
+    assert(new_token.has_value());
+    assert(backend.submit(operation(2, voris::io::backend_operation_kind::read,
+                                    *new_token))
+               .has_value());
+    assert(backend.close_handle(*new_token).has_value());
 }
 
 void test_kernel_mode_queued_cancellation_completes_cancelled_once() {
@@ -2001,6 +2011,9 @@ void test_socket_operations_interact_with_queued_cancellation_and_shutdown() {
     assert(*polled == 0);
     assert(backend.cancel(81, voris::io::cancellation_reason::manual).has_value());
     assert(backend.cancel(84, voris::io::cancellation_reason::manual).has_value());
+    assert_void_error(backend.submit(operation(84, voris::io::backend_operation_kind::read,
+                                               *token)),
+                      voris::io::vio_error_code::invalid_state);
 
     assert(backend.shutdown().has_value());
 
@@ -2008,10 +2021,10 @@ void test_socket_operations_interact_with_queued_cancellation_and_shutdown() {
     auto drained = backend.drain_completions(completions);
     assert(drained.has_value());
     assert(*drained == 4);
-    assert_drained_closed_completion(completions[0], 81);
-    assert_drained_closed_completion(completions[1], 82);
-    assert_drained_closed_completion(completions[2], 83);
-    assert_drained_closed_completion(completions[3], 84);
+    assert_completion_error(completions[0], 82, voris::io::vio_error_code::cancelled);
+    assert_completion_error(completions[1], 84, voris::io::vio_error_code::cancelled);
+    assert_drained_closed_completion(completions[2], 81);
+    assert_drained_closed_completion(completions[3], 83);
 
     drained = backend.drain_completions(completions);
     assert(drained.has_value());
