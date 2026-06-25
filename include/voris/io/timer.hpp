@@ -20,21 +20,29 @@ public:
     }
 
     [[nodiscard]] bool valid() const noexcept {
-        return id_ != 0;
+        return owner_id_ != 0 && id_ != 0;
     }
 
 private:
     friend class timer_heap;
 
-    explicit timer_handle(std::size_t id) noexcept
-        : id_(id) {}
+    timer_handle(std::size_t owner_id, std::size_t id) noexcept
+        : owner_id_(owner_id),
+          id_(id) {}
 
+    std::size_t owner_id_{0};
     std::size_t id_{0};
 };
 
 class timer_heap {
 public:
     using time_point = virtual_monotonic_clock::time_point;
+
+    timer_heap() noexcept;
+    timer_heap(const timer_heap& other);
+    timer_heap& operator=(const timer_heap& other);
+    timer_heap(timer_heap&& other);
+    timer_heap& operator=(timer_heap&& other);
 
     [[nodiscard]] timer_handle add(time_point deadline);
     [[nodiscard]] bool cancel(timer_handle handle) noexcept;
@@ -48,6 +56,7 @@ private:
         std::size_t id;
     };
 
+    [[nodiscard]] static std::size_t allocate_owner_id() noexcept;
     [[nodiscard]] static bool entry_less(const entry& lhs, const entry& rhs) noexcept;
     void swap_entries(std::size_t lhs, std::size_t rhs) noexcept;
     void sift_up(std::size_t index) noexcept;
@@ -55,6 +64,7 @@ private:
     void repair_at(std::size_t index) noexcept;
     void erase_at(std::size_t index) noexcept;
 
+    std::size_t owner_id_;
     std::size_t next_id_{1};
     std::vector<entry> entries_;
     std::unordered_map<std::size_t, std::size_t> indices_;

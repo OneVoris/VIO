@@ -14,8 +14,10 @@ and adequate until benchmark evidence proves it is a bottleneck.
 ## Decision
 
 Use an indexed binary timer heap as the default timer structure. The heap keeps
-timer handles stable through explicit ids and supports cancellation by marking
-entries cancelled before ready extraction.
+timer handles stable through explicit heap-owner ids plus per-heap timer ids.
+It supports cancellation by looking up live timer ids in an index map and
+eagerly erasing the selected heap entry while repairing the binary-heap
+invariant.
 
 Do not switch to a timer wheel in M3. Timer wheels require bucket sizing,
 wraparound rules, clock-jump rules, and workload-specific tuning that are not

@@ -1,8 +1,58 @@
 #include <voris/io/timer.hpp>
 
+#include <atomic>
 #include <utility>
 
 namespace voris::io {
+
+std::size_t timer_heap::allocate_owner_id() noexcept {
+    static std::atomic<std::size_t> next_owner_id{1};
+    return next_owner_id.fetch_add(1);
+}
+
+timer_heap::timer_heap() noexcept
+    : owner_id_(allocate_owner_id()) {}
+
+timer_heap::timer_heap(const timer_heap& other)
+    : owner_id_(allocate_owner_id()),
+      next_id_(other.next_id_),
+      entries_(other.entries_),
+      indices_(other.indices_) {}
+
+timer_heap& timer_heap::operator=(const timer_heap& other) {
+    if (this == &other) {
+        return *this;
+    }
+
+    owner_id_ = allocate_owner_id();
+    next_id_ = other.next_id_;
+    entries_ = other.entries_;
+    indices_ = other.indices_;
+    return *this;
+}
+
+timer_heap::timer_heap(timer_heap&& other)
+    : owner_id_(std::exchange(other.owner_id_, allocate_owner_id())),
+      next_id_(std::exchange(other.next_id_, 1)),
+      entries_(std::move(other.entries_)),
+      indices_(std::move(other.indices_)) {
+    other.entries_.clear();
+    other.indices_.clear();
+}
+
+timer_heap& timer_heap::operator=(timer_heap&& other) {
+    if (this == &other) {
+        return *this;
+    }
+
+    owner_id_ = std::exchange(other.owner_id_, allocate_owner_id());
+    next_id_ = std::exchange(other.next_id_, 1);
+    entries_ = std::move(other.entries_);
+    indices_ = std::move(other.indices_);
+    other.entries_.clear();
+    other.indices_.clear();
+    return *this;
+}
 
 bool timer_heap::entry_less(const entry& lhs, const entry& rhs) noexcept {
     if (lhs.deadline < rhs.deadline) {
@@ -85,7 +135,7 @@ void timer_heap::erase_at(std::size_t index) noexcept {
 }
 
 timer_handle timer_heap::add(time_point deadline) {
-    const timer_handle handle(next_id_++);
+    const timer_handle handle(owner_id_, next_id_++);
     const auto index = entries_.size();
     entries_.push_back(entry{deadline, handle.id()});
     try {
@@ -99,7 +149,7 @@ timer_handle timer_heap::add(time_point deadline) {
 }
 
 bool timer_heap::cancel(timer_handle handle) noexcept {
-    if (!handle.valid()) {
+    if (!handle.valid() || handle.owner_id_ != owner_id_) {
         return false;
     }
 
@@ -117,7 +167,7 @@ std::vector<timer_handle> timer_heap::pop_ready(time_point now) {
 
     while (!entries_.empty() && entries_.front().deadline <= now) {
         const auto id = entries_.front().id;
-        ready.push_back(timer_handle(id));
+        ready.push_back(timer_handle(owner_id_, id));
         erase_at(0);
     }
     return ready;

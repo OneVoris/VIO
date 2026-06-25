@@ -74,6 +74,25 @@ void cancel_rejects_invalid_duplicate_and_removed_handles() {
     assert(!heap.cancel(second));
 }
 
+void cancel_rejects_handle_from_another_heap() {
+    timer_heap first_heap;
+    timer_heap second_heap;
+
+    auto first_handle = first_heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto second_handle = second_heap.add(virtual_monotonic_clock::time_point{20ms});
+
+    assert(first_handle.id() == second_handle.id());
+    assert(!second_heap.cancel(first_handle));
+    assert(second_heap.size() == 1);
+    assert(second_heap.next_deadline() == virtual_monotonic_clock::time_point{20ms});
+
+    auto ready = second_heap.pop_ready(virtual_monotonic_clock::time_point{20ms});
+    assert(ready.size() == 1);
+    assert(ready.front().id() == second_handle.id());
+    assert(second_heap.size() == 0);
+    assert(!second_heap.next_deadline().has_value());
+}
+
 void interleaved_add_cancel_pop_keeps_accounting() {
     timer_heap heap;
     auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
@@ -100,6 +119,33 @@ void interleaved_add_cancel_pop_keeps_accounting() {
     assert(heap.size() == 0);
 }
 
+void erase_at_sifts_moved_last_entry_up_and_tracks_index() {
+    timer_heap heap;
+    auto root = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto high_parent = heap.add(virtual_monotonic_clock::time_point{50ms});
+    auto low_parent = heap.add(virtual_monotonic_clock::time_point{20ms});
+    auto removed = heap.add(virtual_monotonic_clock::time_point{60ms});
+    auto sibling = heap.add(virtual_monotonic_clock::time_point{70ms});
+    auto leaf = heap.add(virtual_monotonic_clock::time_point{80ms});
+    auto moved = heap.add(virtual_monotonic_clock::time_point{30ms});
+
+    assert(heap.cancel(removed));
+    assert(heap.size() == 6);
+    assert(heap.cancel(root));
+    assert(heap.cancel(low_parent));
+    assert(heap.size() == 4);
+    assert(heap.next_deadline() == virtual_monotonic_clock::time_point{30ms});
+    assert(heap.cancel(moved));
+    assert(heap.size() == 3);
+
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{80ms});
+    assert(ready.size() == 3);
+    assert(ready[0].id() == high_parent.id());
+    assert(ready[1].id() == sibling.id());
+    assert(ready[2].id() == leaf.id());
+    assert(heap.size() == 0);
+}
+
 void sleep_uses_virtual_clock() {
     default_scheduler scheduler;
     scheduler_ref ref(scheduler);
@@ -122,7 +168,9 @@ int main() {
     cancel_earliest_updates_deadline_and_size();
     cancel_non_root_removes_handle_from_ready_results();
     cancel_rejects_invalid_duplicate_and_removed_handles();
+    cancel_rejects_handle_from_another_heap();
     interleaved_add_cancel_pop_keeps_accounting();
+    erase_at_sifts_moved_last_entry_up_and_tracks_index();
 
     timer_heap heap;
     auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
