@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <limits>
 #include <utility>
+#include <vector>
 
 #include "test_assert.hpp"
 
@@ -163,6 +164,10 @@ void test_socket_error_policy_classifies_retry_and_pending_paths() {
     assert(classify_socket_transfer_errno(EAGAIN) ==
            socket_errno_action::operation_in_progress);
 #endif
+#if defined(EWOULDBLOCK) && (!defined(EAGAIN) || EWOULDBLOCK != EAGAIN)
+    assert(classify_socket_transfer_errno(EWOULDBLOCK) ==
+           socket_errno_action::operation_in_progress);
+#endif
     assert(classify_socket_transfer_errno(EBADF) == socket_errno_action::provider_failure);
 
 #if defined(EINTR)
@@ -174,14 +179,30 @@ void test_socket_error_policy_classifies_retry_and_pending_paths() {
 #if defined(EAGAIN)
     assert(classify_socket_accept_errno(EAGAIN) == socket_errno_action::operation_in_progress);
 #endif
+#if defined(EWOULDBLOCK) && (!defined(EAGAIN) || EWOULDBLOCK != EAGAIN)
+    assert(classify_socket_accept_errno(EWOULDBLOCK) ==
+           socket_errno_action::operation_in_progress);
+#endif
     assert(classify_socket_accept_errno(EBADF) == socket_errno_action::provider_failure);
 
 #if defined(EINTR)
     assert(classify_socket_connect_errno(EINTR) ==
            socket_errno_action::operation_in_progress);
 #endif
+#if defined(EINPROGRESS)
+    assert(classify_socket_connect_errno(EINPROGRESS) ==
+           socket_errno_action::operation_in_progress);
+#endif
 #if defined(EALREADY)
     assert(classify_socket_connect_errno(EALREADY) ==
+           socket_errno_action::operation_in_progress);
+#endif
+#if defined(EAGAIN)
+    assert(classify_socket_connect_errno(EAGAIN) ==
+           socket_errno_action::operation_in_progress);
+#endif
+#if defined(EWOULDBLOCK) && (!defined(EAGAIN) || EWOULDBLOCK != EAGAIN)
+    assert(classify_socket_connect_errno(EWOULDBLOCK) ==
            socket_errno_action::operation_in_progress);
 #endif
     assert(classify_socket_connect_errno(EBADF) == socket_errno_action::provider_failure);
@@ -313,10 +334,52 @@ void fill_socket_until_would_block(int fd) {
             continue;
         }
         assert(count == -1);
+        if (errno == EINTR) {
+            continue;
+        }
         assert(errno == EAGAIN || errno == EWOULDBLOCK);
         return;
     }
     assert(false);
+}
+
+void drain_some_socket_data(int fd) {
+    std::array<std::byte, 4096> buffer{};
+    for (;;) {
+        const ssize_t count = ::recv(fd, buffer.data(), buffer.size(), 0);
+        if (count > 0) {
+            return;
+        }
+        if (count == -1 && errno == EINTR) {
+            continue;
+        }
+        assert(false);
+    }
+}
+
+template <class Attempt>
+std::size_t require_successful_partial_write(int writer,
+                                             int reader,
+                                             std::size_t requested,
+                                             Attempt&& attempt) {
+    using voris::io::vio_error_code;
+
+    fill_socket_until_would_block(writer);
+    for (std::size_t retry = 0; retry < 64; ++retry) {
+        drain_some_socket_data(reader);
+
+        voris::io::io_result<std::size_t> written = attempt();
+        if (written.has_value()) {
+            assert(*written > 0);
+            assert(*written < requested);
+            return *written;
+        }
+
+        assert(written.error().classification == vio_error_code::operation_in_progress);
+        assert(!written.error().provider_code.has_value());
+    }
+    assert(false);
+    return 0;
 }
 
 void wait_for_events(int fd, short events) {
@@ -578,6 +641,54 @@ void test_linux_vector_read_write_preserves_buffer_order_and_partial_progress() 
     assert(out_third[1] == std::byte{0x76});
     assert(out_third[2] == std::byte{0x00});
     assert(out_third[3] == std::byte{0x00});
+}
+
+void test_linux_write_some_reports_successful_partial_progress() {
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    set_nonblocking_fd(sockets[1].get());
+
+    std::vector<std::byte> input(256 * 1024, std::byte{0x70});
+    const std::size_t written = require_successful_partial_write(
+        sockets[0].get(),
+        sockets[1].get(),
+        input.size(),
+        [&]() {
+            return write_some(static_cast<std::size_t>(sockets[0].get()),
+                              std::span<const std::byte>(input));
+        });
+    assert(written > 0);
+    assert(written < input.size());
+}
+
+void test_linux_vector_write_some_reports_successful_partial_progress() {
+    using voris::io::buffer_chain_view;
+    using voris::io::total_size;
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    set_nonblocking_fd(sockets[1].get());
+
+    std::vector<std::byte> first(128 * 1024, std::byte{0x76});
+    std::vector<std::byte> second(128 * 1024, std::byte{0x77});
+    const std::array<buffer_chain_view, 2> buffers{{
+        buffer_chain_view{std::span<const std::byte>(first)},
+        buffer_chain_view{std::span<const std::byte>(second)},
+    }};
+    const std::size_t requested = total_size(buffers);
+
+    const std::size_t written = require_successful_partial_write(
+        sockets[0].get(),
+        sockets[1].get(),
+        requested,
+        [&]() {
+            return write_some(static_cast<std::size_t>(sockets[0].get()), buffers);
+        });
+    assert(written > 0);
+    assert(written < requested);
 }
 
 void test_linux_write_some_on_non_socket_reports_provider_error() {
@@ -998,6 +1109,8 @@ int main() {
     test_linux_accept_connect_validation();
     test_linux_read_some_reports_partial_progress_without_taking_ownership();
     test_linux_vector_read_write_preserves_buffer_order_and_partial_progress();
+    test_linux_write_some_reports_successful_partial_progress();
+    test_linux_vector_write_some_reports_successful_partial_progress();
     test_linux_write_some_on_non_socket_reports_provider_error();
     test_linux_vector_write_some_on_non_socket_reports_provider_error();
     test_linux_would_block_read_uses_operation_in_progress();
