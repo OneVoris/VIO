@@ -38,12 +38,11 @@ public:
     }
 
     [[nodiscard]] void_result send(T value) {
-        return send_impl(std::move(value), [] { return std::optional<vio_error>{}; });
+        return send_impl(value, [] { return std::optional<vio_error>{}; });
     }
 
     [[nodiscard]] void_result send(T value, const cancellation_token& token) {
-        return send_impl(std::move(value),
-                         [&token] { return cancellation_wait_error(token); });
+        return send_impl(value, [&token] { return cancellation_wait_error(token); });
     }
 
     template<class Clock, class Duration>
@@ -51,8 +50,7 @@ public:
     [[nodiscard]] void_result send(T value,
                                    const deadline& limit,
                                    std::chrono::time_point<Clock, Duration> now) {
-        return send_impl(std::move(value),
-                         [&limit, now] { return deadline_wait_error(limit, now); });
+        return send_impl(value, [&limit, now] { return deadline_wait_error(limit, now); });
     }
 
     [[nodiscard]] io_result<T> receive() {
@@ -103,7 +101,7 @@ private:
     }
 
     template<class WaitGuard>
-    [[nodiscard]] void_result send_impl(T value, WaitGuard before_wait) {
+    [[nodiscard]] void_result send_impl(T& value, WaitGuard before_wait) {
         if (closed_) {
             return std::unexpected(make_error(vio_error_code::closed));
         }
