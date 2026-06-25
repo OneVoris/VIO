@@ -5,8 +5,10 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <voris/io/backend.hpp>
@@ -39,6 +41,9 @@ inline constexpr std::size_t iocp_max_completion_batch_limit = 256U;
 inline constexpr std::size_t iocp_max_native_packet_capacity = 1024U;
 inline constexpr std::size_t iocp_max_association_count =
     iocp_completion_key_low_mask < 32768U ? iocp_completion_key_low_mask : 32768U;
+inline constexpr std::uintptr_t iocp_status_success = 0U;
+inline constexpr std::uintptr_t iocp_status_operation_aborted = 995U;
+inline constexpr std::uintptr_t iocp_status_cancelled = 0xC0000120U;
 
 struct iocp_completion_key_token {
     std::size_t association_id{};
@@ -103,6 +108,19 @@ struct iocp_native_completion_packet {
                                                 iocp_completion_key_token key,
                                                 std::size_t bytes_transferred,
                                                 void* overlapped);
+[[nodiscard]] void_result queue_iocp_test_packet(iocp_backend& backend,
+                                                 iocp_completion_key_token key,
+                                                 std::size_t bytes_transferred,
+                                                 void* overlapped,
+                                                 std::uintptr_t internal_status);
+[[nodiscard]] io_result<void*> iocp_overlapped_for(iocp_backend& backend,
+                                                   std::size_t operation_id);
+[[nodiscard]] std::size_t iocp_operation_storage_count(
+    const iocp_backend& backend) noexcept;
+[[nodiscard]] std::size_t iocp_active_operation_id_count(
+    const iocp_backend& backend) noexcept;
+[[nodiscard]] std::size_t iocp_cancel_request_count(
+    const iocp_backend& backend) noexcept;
 [[nodiscard]] std::size_t iocp_native_packet_count(const iocp_backend& backend) noexcept;
 [[nodiscard]] io_result<std::size_t> drain_iocp_native_packets(
     iocp_backend& backend,
@@ -150,6 +168,20 @@ private:
                                                      detail::iocp_completion_key_token key,
                                                      std::size_t bytes_transferred,
                                                      void* overlapped);
+    friend void_result detail::queue_iocp_test_packet(
+        iocp_backend& backend,
+        detail::iocp_completion_key_token key,
+        std::size_t bytes_transferred,
+        void* overlapped,
+        std::uintptr_t internal_status);
+    friend io_result<void*> detail::iocp_overlapped_for(iocp_backend& backend,
+                                                        std::size_t operation_id);
+    friend std::size_t detail::iocp_operation_storage_count(
+        const iocp_backend& backend) noexcept;
+    friend std::size_t detail::iocp_active_operation_id_count(
+        const iocp_backend& backend) noexcept;
+    friend std::size_t detail::iocp_cancel_request_count(
+        const iocp_backend& backend) noexcept;
     friend std::size_t detail::iocp_native_packet_count(
         const iocp_backend& backend) noexcept;
     friend io_result<std::size_t> detail::drain_iocp_native_packets(
@@ -164,6 +196,7 @@ private:
         bool reusable{};
         bool bump_generation_on_reuse{};
     };
+    struct operation_storage;
 
     [[nodiscard]] io_result<detail::iocp_completion_key_token> create_association(
         backend_handle_token token);
@@ -173,6 +206,18 @@ private:
         backend_handle_token token) const;
     [[nodiscard]] std::optional<backend_handle_token> current_handle_for(
         detail::iocp_completion_key_token key) const noexcept;
+    [[nodiscard]] void_result validate_operation_for_submit(
+        const backend_operation& operation) const;
+    [[nodiscard]] void_result request_cancel_for(operation_storage& storage);
+    void mark_close_requested(backend_handle_token token);
+    void mark_shutdown_requested();
+    [[nodiscard]] std::size_t observe_queued_native_packets();
+    void observe_native_packet(const detail::iocp_native_completion_packet& packet);
+    void complete_native_operation(operation_storage& storage,
+                                   std::size_t bytes_transferred,
+                                   std::uintptr_t internal_status);
+    void erase_operation_storage(std::size_t operation_id);
+    void maybe_close_stopped_port() noexcept;
 
 #if defined(_WIN32)
     void close_owned_port() noexcept;
@@ -183,12 +228,17 @@ private:
     iocp_backend_options options_;
     virtual_backend fallback_;
     std::deque<detail::iocp_native_completion_packet> native_packets_{};
+    std::deque<backend_completion> completion_queue_{};
+    std::unordered_map<std::size_t, std::unique_ptr<operation_storage>> operations_{};
+    std::unordered_map<void*, std::size_t> operation_id_by_overlapped_{};
+    std::unordered_set<std::size_t> active_operation_ids_{};
     std::vector<association_entry> associations_{};
     std::vector<std::size_t> free_association_ids_{};
     std::unordered_map<std::size_t, std::size_t> association_by_native_handle_{};
     void* completion_port_{};
     bool stopped_{false};
     std::optional<vio_error> initialization_error_{};
+    std::size_t cancel_request_count_{};
 };
 
 } // namespace voris::io::backends

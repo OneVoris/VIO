@@ -1,6 +1,8 @@
 #include <voris/io/backends/iocp_backend.hpp>
 
 #include <algorithm>
+#include <string>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -25,17 +27,65 @@ namespace {
     return make_error(vio_error_code::backend_failure,
                       static_cast<std::int64_t>(provider_code));
 }
+#endif
+
+[[nodiscard]] vio_error provider_failure_status(std::uintptr_t provider_code) {
+    return make_error(vio_error_code::backend_failure,
+                      static_cast<std::int64_t>(provider_code));
+}
 
 [[nodiscard]] void_result closed_error() {
     return std::unexpected(make_error(vio_error_code::closed));
 }
-#else
+
+[[nodiscard]] vio_error invalid_state_error(std::string diagnostic) {
+    return make_error(vio_error_code::invalid_state, std::move(diagnostic));
+}
+
+[[nodiscard]] void_result closed_completion() {
+    return std::unexpected(make_error(vio_error_code::closed));
+}
+
+[[nodiscard]] void_result cancelled_completion(cancellation_reason reason) {
+    return std::unexpected(make_error(vio_error_code::cancelled,
+                                      std::string("IOCP operation cancelled: ") +
+                                          std::string(to_string(reason))));
+}
+
+[[nodiscard]] bool iocp_status_is_cancelled(std::uintptr_t status) noexcept {
+    return status == detail::iocp_status_operation_aborted ||
+           status == detail::iocp_status_cancelled;
+}
+
+#if !defined(_WIN32)
 [[nodiscard]] vio_error unsupported_error() {
     return make_error(vio_error_code::unsupported, "IOCP backend is unavailable");
 }
 #endif
 
 } // namespace
+
+struct iocp_backend::operation_storage {
+    backend_operation operation{};
+    detail::iocp_completion_key_token completion_key{};
+    std::optional<cancellation_reason> cancellation{};
+    bool cancel_requested{};
+    bool close_requested{};
+
+#if defined(_WIN32)
+    OVERLAPPED overlapped{};
+
+    [[nodiscard]] void* overlapped_address() noexcept {
+        return &overlapped;
+    }
+#else
+    std::byte overlapped{};
+
+    [[nodiscard]] void* overlapped_address() noexcept {
+        return &overlapped;
+    }
+#endif
+};
 
 iocp_backend::iocp_backend(iocp_backend_options options) : options_(options) {
     if (options_.completion_batch_limit == 0) {
@@ -238,10 +288,227 @@ std::optional<backend_handle_token> iocp_backend::current_handle_for(
     return entry.token;
 }
 
+void_result iocp_backend::validate_operation_for_submit(
+    const backend_operation& operation) const {
+    if (operation.id == 0) {
+        return std::unexpected(invalid_state_error("operation id must be non-zero"));
+    }
+    if (!is_valid_backend_operation_shape(operation)) {
+        return std::unexpected(
+            invalid_state_error("IOCP submit received an invalid operation target"));
+    }
+    if (!fallback_.is_current_handle(operation.handle)) {
+        return std::unexpected(
+            invalid_state_error("operation handle token is not current"));
+    }
+    if (active_operation_ids_.contains(operation.id)) {
+        return std::unexpected(invalid_state_error("operation id is already active"));
+    }
+    return {};
+}
+
+void_result iocp_backend::request_cancel_for(operation_storage& storage) {
+    if (storage.cancel_requested) {
+        return {};
+    }
+
+#if defined(_WIN32)
+    const auto handle = reinterpret_cast<HANDLE>(storage.operation.handle.native_handle);
+    if (::CancelIoEx(handle, static_cast<LPOVERLAPPED>(storage.overlapped_address())) == 0) {
+        const DWORD provider_code = ::GetLastError();
+        if (provider_code != ERROR_NOT_FOUND && provider_code != ERROR_INVALID_HANDLE) {
+            return std::unexpected(provider_failure(provider_code));
+        }
+    }
+#endif
+    storage.cancel_requested = true;
+    ++cancel_request_count_;
+    return {};
+}
+
+void iocp_backend::mark_close_requested(backend_handle_token token) {
+    for (auto& [operation_id, storage] : operations_) {
+        (void)operation_id;
+        if (storage->operation.handle == token) {
+            storage->close_requested = true;
+            (void)request_cancel_for(*storage);
+        }
+    }
+}
+
+void iocp_backend::mark_shutdown_requested() {
+    for (auto& [operation_id, storage] : operations_) {
+        (void)operation_id;
+        storage->close_requested = true;
+        (void)request_cancel_for(*storage);
+    }
+}
+
+std::size_t iocp_backend::observe_queued_native_packets() {
+    const auto count = std::min(options_.completion_batch_limit, native_packets_.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto packet = native_packets_.front();
+        native_packets_.pop_front();
+        observe_native_packet(packet);
+    }
+    return count;
+}
+
+void iocp_backend::observe_native_packet(
+    const detail::iocp_native_completion_packet& packet) {
+    if (packet.overlapped == nullptr) {
+        return;
+    }
+
+    const auto by_overlapped = operation_id_by_overlapped_.find(packet.overlapped);
+    if (by_overlapped == operation_id_by_overlapped_.end()) {
+        return;
+    }
+
+    const auto found = operations_.find(by_overlapped->second);
+    if (found == operations_.end()) {
+        operation_id_by_overlapped_.erase(by_overlapped);
+        return;
+    }
+
+    auto& storage = *found->second;
+    if (storage.completion_key.association_id != packet.completion_key.association_id ||
+        storage.completion_key.generation != packet.completion_key.generation) {
+        return;
+    }
+
+    complete_native_operation(storage, packet.bytes_transferred, packet.internal_status);
+}
+
+void iocp_backend::complete_native_operation(operation_storage& storage,
+                                             std::size_t bytes_transferred,
+                                             std::uintptr_t internal_status) {
+    backend_completion completion{};
+    completion.operation_id = storage.operation.id;
+
+    const bool handle_current = fallback_.is_current_handle(storage.operation.handle);
+    if (storage.close_requested || stopped_ || !handle_current) {
+        completion.result = closed_completion();
+    } else if (iocp_status_is_cancelled(internal_status)) {
+        completion.result = cancelled_completion(
+            storage.cancellation.value_or(cancellation_reason::backend_abort));
+    } else if (internal_status != detail::iocp_status_success) {
+        completion.result = std::unexpected(provider_failure_status(internal_status));
+    } else {
+        switch (storage.operation.kind) {
+        case backend_operation_kind::read:
+        case backend_operation_kind::write:
+            completion.bytes_transferred = bytes_transferred;
+            break;
+        case backend_operation_kind::accept:
+            completion.accepted_native_handle = bytes_transferred;
+            break;
+        case backend_operation_kind::connect:
+        case backend_operation_kind::fsync:
+            break;
+        case backend_operation_kind::close:
+        case backend_operation_kind::wake:
+            completion.result = std::unexpected(
+                invalid_state_error("unexpected non-I/O IOCP completion"));
+            break;
+        }
+    }
+
+    const auto operation_id = storage.operation.id;
+    completion_queue_.push_back(std::move(completion));
+    erase_operation_storage(operation_id);
+}
+
+void iocp_backend::erase_operation_storage(std::size_t operation_id) {
+    auto found = operations_.find(operation_id);
+    if (found == operations_.end()) {
+        return;
+    }
+
+    operation_id_by_overlapped_.erase(found->second->overlapped_address());
+    operations_.erase(found);
+    maybe_close_stopped_port();
+}
+
+void iocp_backend::maybe_close_stopped_port() noexcept {
+#if defined(_WIN32)
+    if (stopped_ && operations_.empty()) {
+        native_packets_.clear();
+        association_by_native_handle_.clear();
+        associations_.clear();
+        free_association_ids_.clear();
+        close_owned_port();
+    }
+#endif
+}
+
 io_result<detail::iocp_completion_key_token> detail::iocp_completion_key_for(
     const iocp_backend& backend,
     backend_handle_token token) {
     return backend.completion_key_for(token);
+}
+
+void_result detail::queue_iocp_test_packet(iocp_backend& backend,
+                                           iocp_completion_key_token key,
+                                           std::size_t bytes_transferred,
+                                           void* overlapped,
+                                           std::uintptr_t internal_status) {
+#if defined(_WIN32)
+    if (backend.native_packets_.size() >= backend.options_.native_packet_capacity) {
+        return std::unexpected(make_error(vio_error_code::resource_exhausted,
+                                          "IOCP native packet queue is full"));
+    }
+
+    const auto raw_key = pack_iocp_completion_key(key);
+    if (!raw_key.has_value()) {
+        return std::unexpected(raw_key.error());
+    }
+
+    backend.native_packets_.push_back(iocp_native_completion_packet{
+        bytes_transferred,
+        key,
+        *raw_key,
+        backend.current_handle_for(key).value_or(backend_handle_token{}),
+        overlapped,
+        internal_status,
+    });
+    return {};
+#else
+    (void)backend;
+    (void)key;
+    (void)bytes_transferred;
+    (void)overlapped;
+    (void)internal_status;
+    return std::unexpected(unsupported_error());
+#endif
+}
+
+io_result<void*> detail::iocp_overlapped_for(iocp_backend& backend,
+                                             std::size_t operation_id) {
+#if defined(_WIN32)
+    auto found = backend.operations_.find(operation_id);
+    if (found == backend.operations_.end()) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "IOCP operation id has no active storage"));
+    }
+    return found->second->overlapped_address();
+#else
+    (void)backend;
+    (void)operation_id;
+    return std::unexpected(unsupported_error());
+#endif
+}
+
+std::size_t detail::iocp_operation_storage_count(const iocp_backend& backend) noexcept {
+    return backend.operations_.size();
+}
+
+std::size_t detail::iocp_active_operation_id_count(const iocp_backend& backend) noexcept {
+    return backend.active_operation_ids_.size();
+}
+
+std::size_t detail::iocp_cancel_request_count(const iocp_backend& backend) noexcept {
+    return backend.cancel_request_count_;
 }
 
 std::size_t detail::iocp_native_packet_count(const iocp_backend& backend) noexcept {
@@ -308,13 +575,16 @@ io_result<std::size_t> iocp_backend::observe_native_completions() {
     if (completion_port_ == nullptr) {
         return std::unexpected(make_error(vio_error_code::closed));
     }
-    if (native_packets_.size() >= options_.native_packet_capacity) {
-        return std::unexpected(make_error(vio_error_code::resource_exhausted,
-                                          "IOCP native packet queue is full"));
+
+    const std::size_t queued_observed = observe_queued_native_packets();
+    if (queued_observed >= options_.completion_batch_limit) {
+        return queued_observed;
+    }
+    if (completion_port_ == nullptr) {
+        return queued_observed;
     }
 
-    const auto capacity_remaining = options_.native_packet_capacity - native_packets_.size();
-    const auto batch_limit = std::min(options_.completion_batch_limit, capacity_remaining);
+    const auto batch_limit = options_.completion_batch_limit - queued_observed;
     std::vector<OVERLAPPED_ENTRY> entries(batch_limit);
     ULONG removed = 0;
     if (::GetQueuedCompletionStatusEx(static_cast<HANDLE>(completion_port_),
@@ -323,7 +593,7 @@ io_result<std::size_t> iocp_backend::observe_native_completions() {
                                       &removed, 0, FALSE) == 0) {
         const DWORD provider_code = ::GetLastError();
         if (provider_code == WAIT_TIMEOUT) {
-            return 0U;
+            return queued_observed;
         }
         return std::unexpected(provider_failure(provider_code));
     }
@@ -343,25 +613,18 @@ io_result<std::size_t> iocp_backend::observe_native_completions() {
             ++observed;
             continue;
         }
-        const auto handle = current_handle_for(*completion_key);
-        if (!handle.has_value()) {
-            ++observed;
-            continue;
-        }
 
-        // M7-003 will map current OVERLAPPED storage to user completions. M7-002
-        // only preserves the native packet and proves stale generation handling.
-        native_packets_.push_back(detail::iocp_native_completion_packet{
+        observe_native_packet(detail::iocp_native_completion_packet{
             static_cast<std::size_t>(entry.dwNumberOfBytesTransferred),
             *completion_key,
             key,
-            *handle,
+            current_handle_for(*completion_key).value_or(backend_handle_token{}),
             entry.lpOverlapped,
             static_cast<std::uintptr_t>(entry.Internal),
         });
         ++observed;
     }
-    return observed;
+    return queued_observed + observed;
 }
 #else
 void_result detail::post_iocp_test_packet(iocp_backend&,
@@ -425,7 +688,23 @@ void_result iocp_backend::submit(backend_operation operation) {
     if (auto initialized = initialization_result(); !initialized.has_value()) {
         return initialized;
     }
-    return fallback_.submit(operation);
+    if (auto valid = validate_operation_for_submit(operation); !valid.has_value()) {
+        return valid;
+    }
+    auto key = completion_key_for(operation.handle);
+    if (!key.has_value()) {
+        return std::unexpected(key.error());
+    }
+
+    auto storage = std::make_unique<operation_storage>();
+    storage->operation = operation;
+    storage->completion_key = *key;
+    void* overlapped = storage->overlapped_address();
+
+    active_operation_ids_.insert(operation.id);
+    operation_id_by_overlapped_[overlapped] = operation.id;
+    operations_.emplace(operation.id, std::move(storage));
+    return {};
 #else
     (void)operation;
     return std::unexpected(unsupported_error());
@@ -440,7 +719,19 @@ void_result iocp_backend::cancel(std::size_t operation_id, cancellation_reason r
     if (auto initialized = initialization_result(); !initialized.has_value()) {
         return initialized;
     }
-    return fallback_.cancel(operation_id, reason);
+    if (operation_id == 0) {
+        return std::unexpected(invalid_state_error("operation id must be non-zero"));
+    }
+
+    auto found = operations_.find(operation_id);
+    if (found == operations_.end()) {
+        return std::unexpected(invalid_state_error("operation id is not active"));
+    }
+
+    if (!found->second->cancellation.has_value()) {
+        found->second->cancellation = reason;
+    }
+    return request_cancel_for(*found->second);
 #else
     (void)operation_id;
     (void)reason;
@@ -456,6 +747,10 @@ void_result iocp_backend::close_handle(backend_handle_token token) {
     if (auto initialized = initialization_result(); !initialized.has_value()) {
         return initialized;
     }
+    if (!fallback_.is_current_handle(token)) {
+        return std::unexpected(invalid_state_error("backend handle token is not current"));
+    }
+    mark_close_requested(token);
     auto closed = fallback_.close_handle(token);
     if (!closed.has_value()) {
         return closed;
@@ -470,7 +765,7 @@ void_result iocp_backend::close_handle(backend_handle_token token) {
 
 io_result<std::size_t> iocp_backend::poll() {
 #if defined(_WIN32)
-    if (stopped_) {
+    if (stopped_ && operations_.empty() && completion_port_ == nullptr) {
         return std::unexpected(make_error(vio_error_code::closed));
     }
     if (initialization_error_.has_value()) {
@@ -481,11 +776,7 @@ io_result<std::size_t> iocp_backend::poll() {
     if (!native_observed.has_value()) {
         return std::unexpected(native_observed.error());
     }
-    auto fallback_visible = fallback_.poll();
-    if (!fallback_visible.has_value()) {
-        return std::unexpected(fallback_visible.error());
-    }
-    return *native_observed + *fallback_visible;
+    return *native_observed;
 #else
     return std::unexpected(unsupported_error());
 #endif
@@ -494,7 +785,18 @@ io_result<std::size_t> iocp_backend::poll() {
 io_result<std::size_t> iocp_backend::drain_completions(
     std::span<backend_completion> out) {
 #if defined(_WIN32)
-    return fallback_.drain_completions(out);
+    if (out.empty()) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "completion drain output must not be empty"));
+    }
+
+    const auto count = std::min(out.size(), completion_queue_.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        active_operation_ids_.erase(completion_queue_.front().operation_id);
+        out[index] = std::move(completion_queue_.front());
+        completion_queue_.pop_front();
+    }
+    return count;
 #else
     (void)out;
     return std::unexpected(unsupported_error());
@@ -528,15 +830,10 @@ void_result iocp_backend::shutdown() {
         return {};
     }
 
+    mark_shutdown_requested();
     stopped_ = true;
     auto drained = fallback_.shutdown();
-    // Shutdown closes the owned IOCP port; native packets that were not mapped
-    // before teardown cannot be completed later and are discarded explicitly.
-    native_packets_.clear();
-    association_by_native_handle_.clear();
-    associations_.clear();
-    free_association_ids_.clear();
-    close_owned_port();
+    maybe_close_stopped_port();
     return drained;
 #else
     return fallback_.shutdown();

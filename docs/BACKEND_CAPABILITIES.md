@@ -6,7 +6,7 @@
 | epoll | Linux default | Linux | Readiness backend; real epoll/eventfd validation requires Linux CI. |
 | io_uring | no | Linux | Optional completion backend; default selection falls back to epoll unless core capabilities, exactly-once cancellation races, behavioral differential tests, benchmark evidence, and Linux real-provider validation are all satisfied. |
 | kqueue | platform default | macOS/BSD | Readiness backend; requires macOS/BSD CI. |
-| IOCP | platform default | Windows | Completion backend; owns an IOCP port, associates handles with bounded association-id/generation keys, drains capped native batches, and stores non-wake native packets in a bounded queue for M7-003 mapping. Native overlapped operation storage/completion mapping is scheduled for M7-003. |
+| IOCP | platform default | Windows | Completion backend; owns an IOCP port, associates handles with bounded association-id/generation keys, drains capped native batches, owns heap-stable internal `OVERLAPPED` storage for submitted operations, maps native packets by `OVERLAPPED*`, and treats unknown or stale packets as cleanup-only. Cancellation, close, and shutdown request provider cancellation but keep active storage until the original native completion is observed. |
 
 Common failure classifications:
 

@@ -16,13 +16,15 @@ not expose identical cancellation and file-I/O semantics.
 - IOCP is the Windows completion backend. It owns one completion port, associates
   caller-owned native handles with bounded association-id/generation completion
   keys, and drains wake/native packets in capped `GetQueuedCompletionStatusEx`
-  batches. Non-wake native packets are stored in a bounded backend queue for the
-  M7-003 operation-storage mapping; queue overflow is reported as
-  `resource_exhausted`. Shutdown is teardown: after the owned port is closed,
-  any still-unmapped native packet backlog is discarded explicitly rather than
-  being treated as future user-visible work. `OVERLAPPED` operation storage must
-  remain alive after cancellation until the completion or cancellation result is
-  observed. M7-002 does not yet issue native overlapped read/write requests.
+  batches. Submitted operations own heap-stable internal `OVERLAPPED` storage;
+  native packets map by the original `OVERLAPPED*` plus the submitted
+  association generation to exactly one backend completion. Unknown or stale
+  `OVERLAPPED*` packets are cleanup-only. Cancellation records the first reason,
+  requests `CancelIoEx` for active storage when possible, and keeps the storage
+  alive until the original native completion is observed. Close and shutdown
+  request cancellation but report active operations as `closed` only when their
+  original native completion arrives; the port is kept open during shutdown
+  while active native storage can still be referenced.
 
 Cancellation is always a request. Backends that cannot stop an already-started
 file operation must report the real completion result.

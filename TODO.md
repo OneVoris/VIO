@@ -87,7 +87,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 - [x] **VIO-M7-001** Implement the kqueue backend and wake-up mechanism.
 - [x] **VIO-M7-002** Implement IOCP handle association and batched completion retrieval.
-- [ ] **VIO-M7-003** Define `OVERLAPPED` operation lifetime and cancellation behavior.
+- [x] **VIO-M7-003** Define `OVERLAPPED` operation lifetime and cancellation behavior.
 - [ ] **VIO-M7-004** Run the complete backend contract suite on macOS and Windows.
 - [x] **VIO-M7-005** Document cancellation and file-I/O semantics that cannot be made identical across platforms.
 
