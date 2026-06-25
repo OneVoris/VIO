@@ -4,35 +4,121 @@
 
 namespace voris::io {
 
+bool timer_heap::entry_less(const entry& lhs, const entry& rhs) noexcept {
+    if (lhs.deadline < rhs.deadline) {
+        return true;
+    }
+    if (rhs.deadline < lhs.deadline) {
+        return false;
+    }
+    return lhs.id < rhs.id;
+}
+
+void timer_heap::swap_entries(std::size_t lhs, std::size_t rhs) noexcept {
+    if (lhs == rhs) {
+        return;
+    }
+
+    using std::swap;
+    swap(entries_[lhs], entries_[rhs]);
+    indices_.find(entries_[lhs].id)->second = lhs;
+    indices_.find(entries_[rhs].id)->second = rhs;
+}
+
+void timer_heap::sift_up(std::size_t index) noexcept {
+    while (index > 0) {
+        const auto parent = (index - 1) / 2;
+        if (!entry_less(entries_[index], entries_[parent])) {
+            break;
+        }
+        swap_entries(index, parent);
+        index = parent;
+    }
+}
+
+void timer_heap::sift_down(std::size_t index) noexcept {
+    const auto count = entries_.size();
+    while (true) {
+        const auto left = index * 2 + 1;
+        if (left >= count) {
+            break;
+        }
+
+        const auto right = left + 1;
+        auto smallest = left;
+        if (right < count && entry_less(entries_[right], entries_[left])) {
+            smallest = right;
+        }
+
+        if (!entry_less(entries_[smallest], entries_[index])) {
+            break;
+        }
+
+        swap_entries(index, smallest);
+        index = smallest;
+    }
+}
+
+void timer_heap::repair_at(std::size_t index) noexcept {
+    if (index >= entries_.size()) {
+        return;
+    }
+
+    if (index > 0 && entry_less(entries_[index], entries_[(index - 1) / 2])) {
+        sift_up(index);
+        return;
+    }
+    sift_down(index);
+}
+
+void timer_heap::erase_at(std::size_t index) noexcept {
+    const auto removed_id = entries_[index].id;
+    const auto last = entries_.size() - 1;
+
+    if (index != last) {
+        swap_entries(index, last);
+    }
+
+    indices_.erase(removed_id);
+    entries_.pop_back();
+    repair_at(index);
+}
+
 timer_handle timer_heap::add(time_point deadline) {
     const timer_handle handle(next_id_++);
-    entries_.push_back(entry{deadline, handle.id(), false});
-    std::ranges::push_heap(entries_, std::ranges::greater{}, &entry::deadline);
+    const auto index = entries_.size();
+    entries_.push_back(entry{deadline, handle.id()});
+    try {
+        indices_.emplace(handle.id(), index);
+    } catch (...) {
+        entries_.pop_back();
+        throw;
+    }
+    sift_up(index);
     return handle;
 }
 
 bool timer_heap::cancel(timer_handle handle) noexcept {
-    for (auto& current : entries_) {
-        if (current.id == handle.id() && !current.cancelled) {
-            current.cancelled = true;
-            return true;
-        }
+    if (!handle.valid()) {
+        return false;
     }
-    return false;
+
+    const auto found = indices_.find(handle.id());
+    if (found == indices_.end()) {
+        return false;
+    }
+
+    erase_at(found->second);
+    return true;
 }
 
 std::vector<timer_handle> timer_heap::pop_ready(time_point now) {
     std::vector<timer_handle> ready;
-    std::erase_if(entries_, [](const entry& current) { return current.cancelled; });
-    std::ranges::make_heap(entries_, std::ranges::greater{}, &entry::deadline);
 
     while (!entries_.empty() && entries_.front().deadline <= now) {
-        std::ranges::pop_heap(entries_, std::ranges::greater{}, &entry::deadline);
-        entry current = entries_.back();
-        entries_.pop_back();
-        if (!current.cancelled) {
-            ready.push_back(timer_handle(current.id));
-        }
+        const auto id = entries_.front().id;
+        ready.push_back(timer_handle(id));
+        erase_at(0);
     }
     return ready;
 }

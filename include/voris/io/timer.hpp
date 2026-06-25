@@ -1,9 +1,9 @@
 #pragma once
 
-#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include <voris/io/task.hpp>
@@ -46,11 +46,18 @@ private:
     struct entry {
         time_point deadline;
         std::size_t id;
-        bool cancelled{false};
     };
+
+    [[nodiscard]] static bool entry_less(const entry& lhs, const entry& rhs) noexcept;
+    void swap_entries(std::size_t lhs, std::size_t rhs) noexcept;
+    void sift_up(std::size_t index) noexcept;
+    void sift_down(std::size_t index) noexcept;
+    void repair_at(std::size_t index) noexcept;
+    void erase_at(std::size_t index) noexcept;
 
     std::size_t next_id_{1};
     std::vector<entry> entries_;
+    std::unordered_map<std::size_t, std::size_t> indices_;
 };
 
 [[nodiscard]] task<void> sleep_until(virtual_monotonic_clock& clock,

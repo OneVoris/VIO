@@ -1,30 +1,106 @@
 #include <voris/io/timer.hpp>
 
 #include "test_assert.hpp"
+
+#include <algorithm>
 #include <chrono>
+#include <vector>
 
-int main() {
-    using namespace voris::io;
-    using namespace std::chrono_literals;
+using namespace voris::io;
+using namespace std::chrono_literals;
 
+namespace {
+
+[[nodiscard]] bool contains_handle(const std::vector<timer_handle>& handles,
+                                   timer_handle expected) {
+    return std::ranges::any_of(handles, [expected](timer_handle current) {
+        return current.id() == expected.id();
+    });
+}
+
+void cancel_earliest_updates_deadline_and_size() {
     timer_heap heap;
-    auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
     auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
-    auto cancelled = heap.add(virtual_monotonic_clock::time_point{10ms});
-    assert(heap.cancel(cancelled));
-    assert(!heap.cancel(timer_handle{}));
+    auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
+    auto third = heap.add(virtual_monotonic_clock::time_point{30ms});
+
     assert(heap.size() == 3);
+    assert(heap.cancel(first));
+    assert(heap.size() == 2);
+    assert(heap.next_deadline() == virtual_monotonic_clock::time_point{20ms});
+
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{30ms});
+    assert(ready.size() == 2);
+    assert(ready[0].id() == second.id());
+    assert(ready[1].id() == third.id());
+    assert(!contains_handle(ready, first));
+    assert(heap.size() == 0);
+    assert(!heap.next_deadline().has_value());
+}
+
+void cancel_non_root_removes_handle_from_ready_results() {
+    timer_heap heap;
+    auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto cancelled = heap.add(virtual_monotonic_clock::time_point{30ms});
+    auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
+    auto third = heap.add(virtual_monotonic_clock::time_point{40ms});
+
+    assert(heap.cancel(cancelled));
+    assert(heap.size() == 3);
+    assert(heap.next_deadline() == virtual_monotonic_clock::time_point{10ms});
+
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{40ms});
+    assert(ready.size() == 3);
+    assert(ready[0].id() == first.id());
+    assert(ready[1].id() == second.id());
+    assert(ready[2].id() == third.id());
+    assert(!contains_handle(ready, cancelled));
+    assert(heap.size() == 0);
+}
+
+void cancel_rejects_invalid_duplicate_and_removed_handles() {
+    timer_heap heap;
+    auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
+
+    assert(!heap.cancel(timer_handle{}));
+    assert(heap.cancel(second));
+    assert(!heap.cancel(second));
 
     auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{10ms});
     assert(ready.size() == 1);
     assert(ready.front().id() == first.id());
+    assert(!heap.cancel(first));
+    assert(!heap.cancel(second));
+}
+
+void interleaved_add_cancel_pop_keeps_accounting() {
+    timer_heap heap;
+    auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto cancelled = heap.add(virtual_monotonic_clock::time_point{50ms});
+    auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
+
+    assert(heap.cancel(cancelled));
+    assert(heap.size() == 2);
+
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{15ms});
+    assert(ready.size() == 1);
+    assert(ready.front().id() == first.id());
+    assert(heap.size() == 1);
     assert(heap.next_deadline() == virtual_monotonic_clock::time_point{20ms});
 
-    ready = heap.pop_ready(virtual_monotonic_clock::time_point{20ms});
-    assert(ready.size() == 1);
-    assert(ready.front().id() == second.id());
-    assert(!heap.next_deadline().has_value());
+    auto third = heap.add(virtual_monotonic_clock::time_point{18ms});
+    assert(heap.size() == 2);
+    assert(heap.next_deadline() == virtual_monotonic_clock::time_point{18ms});
 
+    ready = heap.pop_ready(virtual_monotonic_clock::time_point{25ms});
+    assert(ready.size() == 2);
+    assert(ready[0].id() == third.id());
+    assert(ready[1].id() == second.id());
+    assert(heap.size() == 0);
+}
+
+void sleep_uses_virtual_clock() {
     default_scheduler scheduler;
     scheduler_ref ref(scheduler);
     current_scheduler_scope scope(ref);
@@ -38,6 +114,35 @@ int main() {
     auto until_result = std::move(slept_until).take_result();
     assert(until_result.has_value());
     assert(clock.now() == virtual_monotonic_clock::time_point{12ms});
+}
+
+} // namespace
+
+int main() {
+    cancel_earliest_updates_deadline_and_size();
+    cancel_non_root_removes_handle_from_ready_results();
+    cancel_rejects_invalid_duplicate_and_removed_handles();
+    interleaved_add_cancel_pop_keeps_accounting();
+
+    timer_heap heap;
+    auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
+    auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto cancelled = heap.add(virtual_monotonic_clock::time_point{10ms});
+    assert(heap.cancel(cancelled));
+    assert(!heap.cancel(timer_handle{}));
+    assert(heap.size() == 2);
+
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{10ms});
+    assert(ready.size() == 1);
+    assert(ready.front().id() == first.id());
+    assert(heap.next_deadline() == virtual_monotonic_clock::time_point{20ms});
+
+    ready = heap.pop_ready(virtual_monotonic_clock::time_point{20ms});
+    assert(ready.size() == 1);
+    assert(ready.front().id() == second.id());
+    assert(!heap.next_deadline().has_value());
+
+    sleep_uses_virtual_clock();
 
     return 0;
 }

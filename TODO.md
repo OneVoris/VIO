@@ -39,7 +39,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 ## M3 — Timers and Asynchronous Primitives
 
-- [ ] **VIO-M3-001** Implement an indexed timer heap and timer handles.
+- [x] **VIO-M3-001** Implement an indexed timer heap and timer handles.
 - [x] **VIO-M3-002** Implement `sleep_until` and `sleep_for`.
 - [ ] **VIO-M3-003** Implement timer cancellation, same-deadline batching, and clock-jump protection.
 - [x] **VIO-M3-004** Implement bounded `channel<T>` send, receive, and close.
