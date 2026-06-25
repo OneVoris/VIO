@@ -28,11 +28,6 @@ namespace voris::io::backends::detail {
 
 [[nodiscard]] io_uring_capabilities capabilities_from_io_uring_probe_opcodes(
     std::span<const unsigned> supported_opcodes) noexcept;
-[[nodiscard]] bool io_uring_completion_should_report_closed(
-    backend_operation_target target,
-    bool close_requested,
-    bool handle_current,
-    int cqe_result) noexcept;
 
 } // namespace voris::io::backends::detail
 
@@ -294,6 +289,49 @@ void test_io_uring_close_completion_mapping_is_target_aware() {
                                                     true, true, io_uring_canceled_result));
     assert(io_uring_completion_should_report_closed(backend_operation_target::file,
                                                     false, false, io_uring_canceled_result));
+}
+
+void test_io_uring_cancellation_completion_mapping_preserves_first_cancel_reason() {
+    using voris::io::backend_operation_target;
+    using voris::io::backends::detail::io_uring_completion_result_class;
+    using voris::io::backends::detail::io_uring_completion_result_for;
+
+    assert(io_uring_completion_result_for(backend_operation_target::socket,
+                                          true, false, true,
+                                          io_uring_canceled_result) ==
+           io_uring_completion_result_class::cancelled);
+    assert(io_uring_completion_result_for(backend_operation_target::socket,
+                                          true, false, true, 4) ==
+           io_uring_completion_result_class::kernel_result);
+    assert(io_uring_completion_result_for(backend_operation_target::socket,
+                                          true, false, true, -5) ==
+           io_uring_completion_result_class::kernel_result);
+    assert(io_uring_completion_result_for(backend_operation_target::socket,
+                                          true, true, false,
+                                          io_uring_canceled_result) ==
+           io_uring_completion_result_class::cancelled);
+    assert(io_uring_completion_result_for(backend_operation_target::socket,
+                                          true, true, false, 4) ==
+           io_uring_completion_result_class::kernel_result);
+
+    assert(io_uring_completion_result_for(backend_operation_target::file,
+                                          true, true, false,
+                                          io_uring_canceled_result) ==
+           io_uring_completion_result_class::cancelled);
+    assert(io_uring_completion_result_for(backend_operation_target::file,
+                                          true, true, false, -5) ==
+           io_uring_completion_result_class::kernel_result);
+    assert(io_uring_completion_result_for(backend_operation_target::file,
+                                          false, true, true,
+                                          io_uring_canceled_result) ==
+           io_uring_completion_result_class::closed);
+
+    assert(io_uring_completion_result_for(backend_operation_target::socket,
+                                          false, true, true, 4) ==
+           io_uring_completion_result_class::closed);
+    assert(io_uring_completion_result_for(backend_operation_target::socket,
+                                          false, false, false, -5) ==
+           io_uring_completion_result_class::closed);
 }
 
 #if defined(__linux__)
@@ -932,6 +970,45 @@ void test_linux_real_io_uring_shutdown_cancels_submitted_read_without_data() {
     }
 }
 
+void test_linux_real_io_uring_async_cancel_of_submitted_read_completes_once() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_read || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto sockets = make_socket_pair();
+    const auto token = backend.register_handle(static_cast<std::size_t>(sockets[0].get()));
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert(backend.submit(read_operation(991, *token, output)).has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert(backend.cancel(991, voris::io::cancellation_reason::manual).has_value());
+
+    const auto completion = wait_for_real_completion(backend);
+    assert(completion.operation_id == 991);
+    if (!completion.result.has_value()) {
+        const auto classification = completion.result.error().classification;
+        assert(classification == voris::io::vio_error_code::cancelled ||
+               classification == voris::io::vio_error_code::backend_failure);
+    }
+
+    std::array<voris::io::backend_completion, 1> completions{};
+    for (std::size_t attempt = 0; attempt < 64; ++attempt) {
+        polled = backend.poll();
+        assert(polled.has_value());
+        auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(backend.shutdown().has_value());
+}
+
 void test_linux_real_io_uring_submit_requires_cancel_for_kernel_liveness() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
     if (!caps.available || !caps.supports_read) {
@@ -1450,7 +1527,7 @@ void test_queued_operation_can_be_cancelled_before_flush() {
     assert_completion_error(completions[1], 2, voris::io::vio_error_code::closed);
 }
 
-void test_kernel_mode_queued_cancellation_is_rejected_before_recording() {
+void test_kernel_mode_queued_cancellation_completes_cancelled_once() {
     voris::io::backends::io_uring_backend backend(core_capabilities());
     const auto token = backend.register_handle(1);
     assert(token.has_value());
@@ -1458,13 +1535,28 @@ void test_kernel_mode_queued_cancellation_is_rejected_before_recording() {
     std::array<std::byte, 1> output{};
     assert(backend.submit(read_operation(101, *token, output)).has_value());
 
-    assert_void_unsupported(backend.cancel(101, voris::io::cancellation_reason::manual));
+    assert(backend.cancel(101, voris::io::cancellation_reason::manual).has_value());
+    const auto new_token = backend.register_handle(2);
+    assert(new_token.has_value());
+    assert_void_error(backend.submit(read_operation(101, *new_token, output)),
+                      voris::io::vio_error_code::invalid_state);
     assert(backend.close_handle(*token).has_value());
 
-    std::array<voris::io::backend_completion, 1> completions{};
+    std::array<voris::io::backend_completion, 2> completions{};
     const auto drained = backend.drain_completions(completions);
     assert(drained.has_value());
     assert(*drained == 1);
+    assert_completion_error(completions[0], 101, voris::io::vio_error_code::cancelled);
+
+    const auto drained_again = backend.drain_completions(completions);
+    assert(drained_again.has_value());
+    assert(*drained_again == 0);
+
+    assert(backend.submit(read_operation(101, *new_token, output)).has_value());
+    assert(backend.close_handle(*new_token).has_value());
+    const auto closed_drained = backend.drain_completions(completions);
+    assert(closed_drained.has_value());
+    assert(*closed_drained == 1);
     assert_completion_error(completions[0], 101, voris::io::vio_error_code::closed);
 }
 
@@ -1592,14 +1684,24 @@ void test_pending_submission_failure_resolves_only_unsubmitted_tail() {
     assert(failed[1].operation_id == 202);
 }
 
-void test_close_requested_operation_requires_cancel_retry_after_unsubmitted_cancel() {
+void test_cancel_or_close_requested_operation_requires_cancel_retry_after_unsubmitted_cancel() {
     assert(!voris::io::backends::detail::io_uring_cancel_retry_required(false,
+                                                                        false,
                                                                         false));
     assert(!voris::io::backends::detail::io_uring_cancel_retry_required(false,
+                                                                        false,
                                                                         true));
     assert(!voris::io::backends::detail::io_uring_cancel_retry_required(true,
+                                                                        false,
+                                                                        true));
+    assert(!voris::io::backends::detail::io_uring_cancel_retry_required(false,
+                                                                        true,
                                                                         true));
     assert(voris::io::backends::detail::io_uring_cancel_retry_required(true,
+                                                                       false,
+                                                                       false));
+    assert(voris::io::backends::detail::io_uring_cancel_retry_required(false,
+                                                                       true,
                                                                        false));
 }
 
@@ -1967,6 +2069,7 @@ int main() {
     test_backend_contract_carries_socket_payloads_and_results();
     test_backend_contract_carries_file_payloads_offsets_and_fsync();
     test_io_uring_close_completion_mapping_is_target_aware();
+    test_io_uring_cancellation_completion_mapping_preserves_first_cancel_reason();
     test_probe_opcode_mapping_is_deterministic();
     test_probe_files_require_read_write_and_fsync();
     test_probe_registered_capabilities_are_independent_candidates();
@@ -1979,11 +2082,11 @@ int main() {
     test_submit_validates_operation_before_queueing();
     test_submission_queue_is_bounded();
     test_queued_operation_can_be_cancelled_before_flush();
-    test_kernel_mode_queued_cancellation_is_rejected_before_recording();
+    test_kernel_mode_queued_cancellation_completes_cancelled_once();
     test_kernel_submission_requires_cancel_capability_for_close_liveness();
     test_kernel_submit_rejects_invalid_payloads_immediately();
     test_pending_submission_failure_resolves_only_unsubmitted_tail();
-    test_close_requested_operation_requires_cancel_retry_after_unsubmitted_cancel();
+    test_cancel_or_close_requested_operation_requires_cancel_retry_after_unsubmitted_cancel();
     test_poll_flushes_submissions_in_batches();
     test_socket_operations_flow_through_submission_batches_and_close_fifo();
     test_file_operations_flow_through_submission_batches_and_close_fifo();
@@ -2008,6 +2111,7 @@ int main() {
     test_linux_real_io_uring_close_completes_queued_socket_operation();
     test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion();
     test_linux_real_io_uring_shutdown_cancels_submitted_read_without_data();
+    test_linux_real_io_uring_async_cancel_of_submitted_read_completes_once();
     test_linux_real_io_uring_submit_requires_cancel_for_kernel_liveness();
 #endif
 

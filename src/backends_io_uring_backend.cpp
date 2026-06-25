@@ -172,6 +172,12 @@ void apply_probe(io_uring_capabilities& capabilities,
     return std::unexpected(make_error(vio_error_code::closed));
 }
 
+[[nodiscard]] void_result cancelled_completion(cancellation_reason reason) {
+    return std::unexpected(make_error(vio_error_code::cancelled,
+                                      std::string("io_uring operation cancelled: ") +
+                                          std::string(to_string(reason))));
+}
+
 [[nodiscard]] io_uring_backend_options normalize_options(
     io_uring_backend_options options) noexcept {
     if (options.submit_batch_limit == 0) {
@@ -277,19 +283,45 @@ std::vector<pending_io_uring_submission> take_unsubmitted_io_uring_submissions(
     return unsubmitted;
 }
 
-bool io_uring_cancel_retry_required(bool close_requested,
+bool io_uring_cancel_retry_required(bool cancel_requested,
+                                    bool close_requested,
                                     bool cancel_submitted) noexcept {
-    return close_requested && !cancel_submitted;
+    return (cancel_requested || close_requested) && !cancel_submitted;
+}
+
+io_uring_completion_result_class io_uring_completion_result_for(
+    backend_operation_target target,
+    bool cancel_requested,
+    bool close_requested,
+    bool handle_current,
+    int cqe_result) noexcept {
+    if (cancel_requested) {
+        if (cqe_result == -linux_ecanceled) {
+            return io_uring_completion_result_class::cancelled;
+        }
+        return io_uring_completion_result_class::kernel_result;
+    }
+
+    if (target == backend_operation_target::file) {
+        if ((close_requested || !handle_current) && cqe_result == -linux_ecanceled) {
+            return io_uring_completion_result_class::closed;
+        }
+        return io_uring_completion_result_class::kernel_result;
+    }
+
+    if (close_requested || !handle_current) {
+        return io_uring_completion_result_class::closed;
+    }
+    return io_uring_completion_result_class::kernel_result;
 }
 
 bool io_uring_completion_should_report_closed(backend_operation_target target,
                                               bool close_requested,
                                               bool handle_current,
                                               int cqe_result) noexcept {
-    if (target == backend_operation_target::file) {
-        return (close_requested || !handle_current) && cqe_result == -linux_ecanceled;
-    }
-    return close_requested || !handle_current;
+    return io_uring_completion_result_for(target, false, close_requested,
+                                          handle_current, cqe_result) ==
+           io_uring_completion_result_class::closed;
 }
 
 } // namespace detail
@@ -631,18 +663,27 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
     });
     if (queued != submission_queue_.end()) {
         if (use_kernel_submission()) {
-            return std::unexpected(make_error(
-                vio_error_code::unsupported,
-                "io_uring queued cancellation is deferred to M6-005"));
+            completion_queue_.push_back(
+                backend_completion{queued->operation.id, cancelled_completion(reason)});
+            submission_queue_.erase(queued);
+            return {};
         }
         if (!queued->cancellation.has_value()) {
             queued->cancellation = reason;
         }
         return {};
     }
-    if (use_kernel_submission() && kernel_operations_.contains(operation_id)) {
-        return std::unexpected(make_error(vio_error_code::unsupported,
-                                          "io_uring active cancellation is deferred to M6-005"));
+    if (use_kernel_submission()) {
+        auto found = kernel_operations_.find(operation_id);
+        if (found != kernel_operations_.end()) {
+            if (!found->second.cancellation.has_value()) {
+                found->second.cancellation = reason;
+            }
+            if (found->second.cancel_submitted) {
+                return {};
+            }
+            return request_kernel_cancellation_for(operation_id, found->second);
+        }
     }
     return fallback_.cancel(operation_id, reason);
 }
@@ -865,8 +906,9 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
         return valid;
     }
     if (queued.cancellation.has_value()) {
-        return std::unexpected(make_error(vio_error_code::unsupported,
-                                          "io_uring queued cancellation is deferred to M6-005"));
+        completion_queue_.push_back(
+            backend_completion{operation.id, cancelled_completion(*queued.cancellation)});
+        return {};
     }
 
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
@@ -975,21 +1017,28 @@ void_result io_uring_backend::request_kernel_cancellations_for(
         return std::unexpected(cancellation_required_error());
     }
 
+    std::vector<std::size_t> operations_to_cancel{};
+    operations_to_cancel.reserve(kernel_operations_.size());
     for (auto& [operation_id, operation] : kernel_operations_) {
         if (token.generation != 0 && operation.operation.handle != token) {
             continue;
         }
 
-        if (operation.cancel_submitted) {
-            operation.close_requested = true;
+        operation.close_requested = true;
+        if (!operation.cancel_submitted) {
+            operations_to_cancel.push_back(operation_id);
+        }
+    }
+
+    for (const auto operation_id : operations_to_cancel) {
+        auto found = kernel_operations_.find(operation_id);
+        if (found == kernel_operations_.end() || found->second.cancel_submitted) {
             continue;
         }
-
-        if (auto cancelled = request_kernel_cancellation_for(operation_id, operation);
+        if (auto cancelled = request_kernel_cancellation_for(operation_id, found->second);
             !cancelled.has_value()) {
             return cancelled;
         }
-        operation.close_requested = true;
     }
 
     return {};
@@ -1093,16 +1142,31 @@ io_result<std::size_t> io_uring_backend::progress_kernel_submissions() {
 io_result<std::size_t> io_uring_backend::retry_missing_kernel_cancellations() {
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
     std::size_t visible = 0;
-    for (auto& [operation_id, operation] : kernel_operations_) {
+    std::vector<std::size_t> operations_to_retry{};
+    operations_to_retry.reserve(kernel_operations_.size());
+    for (const auto& [operation_id, operation] : kernel_operations_) {
         // A failed enter can prove an internal cancel SQE was never submitted.
-        // Keep the close/shutdown intent and retry once per poll until either
-        // the cancel is submitted or the original operation CQE arrives.
-        if (!detail::io_uring_cancel_retry_required(operation.close_requested,
+        // Keep the cancel or close/shutdown intent and retry once per poll
+        // until either the cancel is submitted or the original operation CQE
+        // arrives.
+        if (!detail::io_uring_cancel_retry_required(operation.cancellation.has_value(),
+                                                    operation.close_requested,
                                                     operation.cancel_submitted)) {
             continue;
         }
+        operations_to_retry.push_back(operation_id);
+    }
 
-        auto retried = request_kernel_cancellation_for(operation_id, operation);
+    for (const auto operation_id : operations_to_retry) {
+        auto found = kernel_operations_.find(operation_id);
+        if (found == kernel_operations_.end() ||
+            !detail::io_uring_cancel_retry_required(found->second.cancellation.has_value(),
+                                                    found->second.close_requested,
+                                                    found->second.cancel_submitted)) {
+            continue;
+        }
+
+        auto retried = request_kernel_cancellation_for(operation_id, found->second);
         if (!retried.has_value()) {
             return std::unexpected(retried.error());
         }
@@ -1142,7 +1206,9 @@ std::size_t io_uring_backend::complete_unsubmitted_kernel_submissions(
 
         backend_completion completion{};
         completion.operation_id = submission.operation_id;
-        if (closed_ || found->second.close_requested ||
+        if (found->second.cancellation.has_value()) {
+            completion.result = cancelled_completion(*found->second.cancellation);
+        } else if (closed_ || found->second.close_requested ||
             !fallback_.is_current_handle(found->second.operation.handle)) {
             completion.result = closed_completion();
         } else {
@@ -1226,8 +1292,12 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
         backend_completion completion{};
         completion.operation_id = operation_id;
         const bool handle_current = fallback_.is_current_handle(operation.operation.handle);
-        if (detail::io_uring_completion_should_report_closed(
-                operation.operation.target, operation.close_requested, handle_current, cqe.res)) {
+        const auto result_class = detail::io_uring_completion_result_for(
+            operation.operation.target, operation.cancellation.has_value(),
+            operation.close_requested, handle_current, cqe.res);
+        if (result_class == detail::io_uring_completion_result_class::cancelled) {
+            completion.result = cancelled_completion(*operation.cancellation);
+        } else if (result_class == detail::io_uring_completion_result_class::closed) {
             if (operation.operation.kind == backend_operation_kind::accept && cqe.res >= 0) {
                 (void)::close(cqe.res);
             }

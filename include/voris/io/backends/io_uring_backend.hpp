@@ -48,6 +48,12 @@ enum class pending_io_uring_submission_kind {
     cancel,
 };
 
+enum class io_uring_completion_result_class {
+    kernel_result,
+    cancelled,
+    closed,
+};
+
 struct pending_io_uring_submission {
     pending_io_uring_submission_kind kind{};
     std::size_t operation_id{};
@@ -60,8 +66,15 @@ void discard_submitted_io_uring_submissions(
 take_unsubmitted_io_uring_submissions(
     std::deque<pending_io_uring_submission>& pending);
 [[nodiscard]] bool io_uring_cancel_retry_required(
+    bool cancel_requested,
     bool close_requested,
     bool cancel_submitted) noexcept;
+[[nodiscard]] io_uring_completion_result_class io_uring_completion_result_for(
+    backend_operation_target target,
+    bool cancel_requested,
+    bool close_requested,
+    bool handle_current,
+    int cqe_result) noexcept;
 [[nodiscard]] bool io_uring_completion_should_report_closed(
     backend_operation_target target,
     bool close_requested,
@@ -103,6 +116,7 @@ private:
     };
     struct kernel_operation {
         backend_operation operation{};
+        std::optional<cancellation_reason> cancellation{};
         bool close_requested{};
         bool cancel_submitted{};
     };
