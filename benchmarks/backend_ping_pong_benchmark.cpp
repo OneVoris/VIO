@@ -6,8 +6,10 @@
 #include <voris/io/backends/epoll_backend.hpp>
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -131,21 +133,22 @@ voris::io::backend_operation write_operation(
     return operation;
 }
 
-[[nodiscard]] bool wait_for_completion(voris::io::backend& backend,
-                                       std::size_t operation_id,
-                                       std::string& reason) {
+[[nodiscard]] std::optional<voris::io::backend_completion> wait_for_completion(
+    voris::io::backend& backend,
+    std::size_t operation_id,
+    std::string& reason) {
     std::array<voris::io::backend_completion, 4> completions{};
     for (std::size_t attempt = 0; attempt != 10000; ++attempt) {
         auto polled = backend.poll();
         if (!polled.has_value()) {
             reason = std::string("poll_") + error_name(polled.error().classification);
-            return false;
+            return std::nullopt;
         }
 
         auto drained = backend.drain_completions(completions);
         if (!drained.has_value()) {
             reason = std::string("drain_") + error_name(drained.error().classification);
-            return false;
+            return std::nullopt;
         }
 
         for (std::size_t index = 0; index != *drained; ++index) {
@@ -156,23 +159,62 @@ voris::io::backend_operation write_operation(
             if (!completion.result.has_value()) {
                 reason = std::string("completion_") +
                          error_name(completion.result.error().classification);
-                return false;
+                return std::nullopt;
             }
-            return true;
+            return completion;
         }
         std::this_thread::yield();
     }
 
     reason = "timeout";
-    return false;
+    return std::nullopt;
 }
 
-[[nodiscard]] bool run_backend(std::string_view backend_name,
-                               voris::io::backend& backend,
-                               std::size_t rounds,
-                               std::size_t& operations,
-                               std::int64_t& elapsed_ns,
-                               std::string& reason) {
+[[nodiscard]] bool send_payload(int fd,
+                                std::span<const std::byte> payload,
+                                std::string& reason) {
+    for (;;) {
+        const auto sent = ::send(fd, payload.data(), payload.size(), MSG_NOSIGNAL);
+        if (sent == static_cast<ssize_t>(payload.size())) {
+            return true;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (sent < 0) {
+            reason = std::string("send_errno_") + std::to_string(errno);
+            return false;
+        }
+        reason = "send_short";
+        return false;
+    }
+}
+
+[[nodiscard]] bool recv_payload(int fd,
+                                std::span<std::byte> output,
+                                std::string& reason) {
+    for (;;) {
+        const auto received = ::recv(fd, output.data(), output.size(), 0);
+        if (received == static_cast<ssize_t>(output.size())) {
+            return true;
+        }
+        if (received < 0 && errno == EINTR) {
+            continue;
+        }
+        if (received < 0) {
+            reason = std::string("recv_errno_") + std::to_string(errno);
+            return false;
+        }
+        reason = "recv_short";
+        return false;
+    }
+}
+
+[[nodiscard]] bool run_epoll_backend(voris::io::backends::epoll_backend& backend,
+                                     std::size_t rounds,
+                                     std::size_t& operations,
+                                     std::int64_t& elapsed_ns,
+                                     std::string& reason) {
     auto sockets = make_socket_pair();
     if (sockets[0].get() < 0 || sockets[1].get() < 0) {
         reason = "socketpair_failed";
@@ -205,7 +247,11 @@ voris::io::backend_operation write_operation(
                      error_name(submitted_write.error().classification);
             return false;
         }
-        if (!wait_for_completion(backend, operation_id, reason)) {
+        if (!wait_for_completion(backend, operation_id, reason).has_value()) {
+            reason = std::string("write_") + reason;
+            return false;
+        }
+        if (!send_payload(sockets[0].get(), payload, reason)) {
             reason = std::string("write_") + reason;
             return false;
         }
@@ -218,7 +264,11 @@ voris::io::backend_operation write_operation(
                      error_name(submitted_read.error().classification);
             return false;
         }
-        if (!wait_for_completion(backend, operation_id, reason)) {
+        if (!wait_for_completion(backend, operation_id, reason).has_value()) {
+            reason = std::string("read_") + reason;
+            return false;
+        }
+        if (!recv_payload(sockets[1].get(), output, reason)) {
             reason = std::string("read_") + reason;
             return false;
         }
@@ -234,7 +284,91 @@ voris::io::backend_operation write_operation(
     elapsed_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started)
             .count();
-    (void)backend_name;
+    (void)backend.shutdown();
+    return true;
+}
+
+[[nodiscard]] bool run_io_uring_backend(
+    voris::io::backends::io_uring_backend& backend,
+    std::size_t rounds,
+    std::size_t& operations,
+    std::int64_t& elapsed_ns,
+    std::string& reason) {
+    auto sockets = make_socket_pair();
+    if (sockets[0].get() < 0 || sockets[1].get() < 0) {
+        reason = "socketpair_failed";
+        return false;
+    }
+
+    auto writer = backend.register_handle(static_cast<std::size_t>(sockets[0].get()));
+    if (!writer.has_value()) {
+        reason = std::string("register_writer_") +
+                 error_name(writer.error().classification);
+        return false;
+    }
+    auto reader = backend.register_handle(static_cast<std::size_t>(sockets[1].get()));
+    if (!reader.has_value()) {
+        reason = std::string("register_reader_") +
+                 error_name(reader.error().classification);
+        return false;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    std::size_t operation_id = 1;
+    for (std::size_t round = 0; round != rounds; ++round) {
+        const std::array payload{std::byte{0x76}};
+        std::array<std::byte, 1> output{};
+
+        auto submitted_write =
+            backend.submit(write_operation(operation_id, *writer, payload));
+        if (!submitted_write.has_value()) {
+            reason = std::string("submit_write_") +
+                     error_name(submitted_write.error().classification);
+            return false;
+        }
+        auto write_completion = wait_for_completion(backend, operation_id, reason);
+        if (!write_completion.has_value()) {
+            reason = std::string("write_") + reason;
+            return false;
+        }
+        const bool write_size_matches =
+            write_completion->bytes_transferred == payload.size();
+        if (!write_size_matches) {
+            reason = "write_short_completion";
+            return false;
+        }
+        ++operation_id;
+
+        auto submitted_read =
+            backend.submit(read_operation(operation_id, *reader, output));
+        if (!submitted_read.has_value()) {
+            reason = std::string("submit_read_") +
+                     error_name(submitted_read.error().classification);
+            return false;
+        }
+        auto read_completion = wait_for_completion(backend, operation_id, reason);
+        if (!read_completion.has_value()) {
+            reason = std::string("read_") + reason;
+            return false;
+        }
+        const bool read_size_matches =
+            read_completion->bytes_transferred == payload.size();
+        if (!read_size_matches) {
+            reason = "read_short_completion";
+            return false;
+        }
+        if (output != payload) {
+            reason = "payload_mismatch";
+            return false;
+        }
+        ++operation_id;
+    }
+    const auto finished = std::chrono::steady_clock::now();
+
+    operations = rounds * 2U;
+    elapsed_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(finished - started)
+            .count();
     (void)backend.shutdown();
     return true;
 }
@@ -251,7 +385,7 @@ int main() {
         std::size_t operations{};
         std::int64_t elapsed_ns{};
         std::string reason{"ok"};
-        if (run_backend("epoll", backend, rounds, operations, elapsed_ns, reason)) {
+        if (run_epoll_backend(backend, rounds, operations, elapsed_ns, reason)) {
             emit_record("epoll", "ok", "ok", rounds, operations, elapsed_ns);
         } else {
             emit_record("epoll", "failed", reason, rounds, operations, elapsed_ns);
@@ -271,7 +405,7 @@ int main() {
         std::size_t operations{};
         std::int64_t elapsed_ns{};
         std::string reason{"ok"};
-        if (run_backend("io_uring", backend, rounds, operations, elapsed_ns, reason)) {
+        if (run_io_uring_backend(backend, rounds, operations, elapsed_ns, reason)) {
             emit_record("io_uring", "ok", "ok", rounds, operations, elapsed_ns);
             return 0;
         }

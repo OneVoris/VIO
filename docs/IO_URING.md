@@ -6,11 +6,13 @@ all default-enable gates.
 
 ## Default-Enable Gates
 
-M6 defines a pure, testable selection model without changing runtime backend
-construction. `io_uring_backend::default_eligible()` reports only the core
-capability gate for an already constructed backend. The release default decision
-uses `io_uring_default_enable_eligible(capabilities, evidence)` and
-`select_default_linux_backend(capabilities, evidence)`.
+M6 defines pure, testable pre-1.0 release-gating policy helpers without changing
+runtime backend construction. `io_uring_backend::default_eligible()` reports
+only the core capability gate for an already constructed backend. The release
+default decision uses `io_uring_default_enable_eligible(capabilities, evidence)`
+and `select_default_linux_backend(capabilities, evidence)`. These helpers are
+evidence evaluation tools; they do not construct backends and are not a promise
+that VIO will switch runtime defaults automatically.
 
 The io_uring default-enable gates are:
 

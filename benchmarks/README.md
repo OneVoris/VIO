@@ -27,6 +27,10 @@ benchmark=backend_ping_pong environment=linux platform=linux workload=socketpair
 benchmark=backend_ping_pong environment=linux platform=linux workload=socketpair_ping_pong backend=io_uring result=ok reason=ok rounds=1000 operations=2000 elapsed_ns=...
 ```
 
+The epoll record measures readiness completions plus explicit benchmark-owned
+`send()`/`recv()` transfers. The io_uring record measures backend-owned
+`write`/`read` transfers and rejects short or zero-byte completions.
+
 On non-Linux hosts, or when io_uring core capabilities are missing, the
 benchmark prints `result=skipped` with a machine-readable `reason` and exits 0.
 Skipped records are useful environment evidence, but they do not satisfy the

@@ -35,6 +35,9 @@ enum class linux_backend_choice {
     io_uring,
 };
 
+// Pre-1.0 Linux backend release-gating policy helpers. They are pure and
+// testable, but they do not construct backends or switch runtime defaults
+// automatically.
 struct io_uring_default_enable_evidence {
     bool cancellation_races_passed{};
     bool differential_tests_passed{};
