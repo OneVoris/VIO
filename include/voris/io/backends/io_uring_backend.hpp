@@ -88,7 +88,8 @@ take_unsubmitted_io_uring_submissions(
 [[nodiscard]] bool io_uring_cancel_retry_required(
     bool cancel_requested,
     bool close_requested,
-    bool cancel_submitted) noexcept;
+    bool cancel_request_submitted,
+    bool cancel_sqe_in_flight) noexcept;
 [[nodiscard]] io_uring_completion_result_class io_uring_completion_result_for(
     backend_operation_target target,
     bool cancel_requested,
@@ -144,7 +145,10 @@ private:
         backend_operation operation{};
         std::optional<cancellation_reason> cancellation{};
         bool close_requested{};
-        bool cancel_submitted{};
+        // True once a cancel request was submitted and not proven unsubmitted.
+        bool cancel_request_submitted{};
+        // True while a cancel CQE may still arrive for bookkeeping cleanup.
+        bool cancel_sqe_in_flight{};
     };
     struct kernel_ring;
 

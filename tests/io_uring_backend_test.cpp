@@ -1736,6 +1736,8 @@ void test_cancel_ack_cqes_are_cleanup_only_around_original_completion() {
     assert(backend.submit(read_operation(321, *token, output)).has_value());
     assert(backend.poll().has_value());
     assert(backend.cancel(321, voris::io::cancellation_reason::manual).has_value());
+    assert(kernel.submitted_cancel_operation_ids.size() == 1);
+    assert(kernel.submitted_cancel_operation_ids[0] == 321);
 
     kernel.completions.push_back(
         io_uring_test_completion{io_uring_test_completion_kind::cancel_ack, 321, 0});
@@ -1746,6 +1748,13 @@ void test_cancel_ack_cqes_are_cleanup_only_around_original_completion() {
     auto drained = backend.drain_completions(completions);
     assert(drained.has_value());
     assert(*drained == 0);
+
+    for (int spin = 0; spin < 2; ++spin) {
+        polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 0);
+        assert(kernel.submitted_cancel_operation_ids.size() == 1);
+    }
 
     kernel.completions.push_back(
         io_uring_test_completion{io_uring_test_completion_kind::operation,
@@ -1961,21 +1970,31 @@ void test_pending_submission_failure_resolves_only_unsubmitted_tail() {
 void test_cancel_or_close_requested_operation_requires_cancel_retry_after_unsubmitted_cancel() {
     assert(!voris::io::backends::detail::io_uring_cancel_retry_required(false,
                                                                         false,
+                                                                        false,
                                                                         false));
     assert(!voris::io::backends::detail::io_uring_cancel_retry_required(false,
                                                                         false,
+                                                                        true,
                                                                         true));
     assert(!voris::io::backends::detail::io_uring_cancel_retry_required(true,
+                                                                        false,
+                                                                        true,
+                                                                        false));
+    assert(!voris::io::backends::detail::io_uring_cancel_retry_required(true,
+                                                                        false,
                                                                         false,
                                                                         true));
     assert(!voris::io::backends::detail::io_uring_cancel_retry_required(false,
                                                                         true,
+                                                                        true,
                                                                         true));
     assert(voris::io::backends::detail::io_uring_cancel_retry_required(true,
+                                                                       false,
                                                                        false,
                                                                        false));
     assert(voris::io::backends::detail::io_uring_cancel_retry_required(false,
                                                                        true,
+                                                                       false,
                                                                        false));
 }
 

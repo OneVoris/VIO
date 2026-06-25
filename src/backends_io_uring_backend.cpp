@@ -285,8 +285,11 @@ std::vector<pending_io_uring_submission> take_unsubmitted_io_uring_submissions(
 
 bool io_uring_cancel_retry_required(bool cancel_requested,
                                     bool close_requested,
-                                    bool cancel_submitted) noexcept {
-    return (cancel_requested || close_requested) && !cancel_submitted;
+                                    bool cancel_request_submitted,
+                                    bool cancel_sqe_in_flight) noexcept {
+    return (cancel_requested || close_requested) &&
+           !cancel_request_submitted &&
+           !cancel_sqe_in_flight;
 }
 
 io_uring_completion_result_class io_uring_completion_result_for(
@@ -678,7 +681,8 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
             if (!found->second.cancellation.has_value()) {
                 found->second.cancellation = reason;
             }
-            if (found->second.cancel_submitted) {
+            if (found->second.cancel_request_submitted ||
+                found->second.cancel_sqe_in_flight) {
                 return {};
             }
             (void)request_kernel_cancellation_for(operation_id, found->second);
@@ -1028,14 +1032,16 @@ void_result io_uring_backend::request_kernel_cancellations_for(
         }
 
         operation.close_requested = true;
-        if (!operation.cancel_submitted) {
+        if (!operation.cancel_request_submitted && !operation.cancel_sqe_in_flight) {
             operations_to_cancel.push_back(operation_id);
         }
     }
 
     for (const auto operation_id : operations_to_cancel) {
         auto found = kernel_operations_.find(operation_id);
-        if (found == kernel_operations_.end() || found->second.cancel_submitted) {
+        if (found == kernel_operations_.end() ||
+            found->second.cancel_request_submitted ||
+            found->second.cancel_sqe_in_flight) {
             continue;
         }
         (void)request_kernel_cancellation_for(operation_id, found->second);
@@ -1078,7 +1084,8 @@ void_result io_uring_backend::request_kernel_cancellation_for(
     sqe->cancel_flags = 0;
     sqe->user_data = *cancel_user_data;
 
-    operation.cancel_submitted = true;
+    operation.cancel_request_submitted = true;
+    operation.cancel_sqe_in_flight = true;
     kernel_cancel_operation_ids_.insert(operation_id);
     pending_kernel_submissions_.push_back(
         detail::pending_io_uring_submission{
@@ -1108,7 +1115,8 @@ void_result io_uring_backend::request_test_kernel_cancellation_for(
                                           "test io_uring cancel SQE is unavailable"));
     }
 
-    operation.cancel_submitted = true;
+    operation.cancel_request_submitted = true;
+    operation.cancel_sqe_in_flight = true;
     kernel_cancel_operation_ids_.insert(operation_id);
     kernel.submitted_cancel_operation_ids.push_back(operation_id);
     return {};
@@ -1170,7 +1178,8 @@ io_result<std::size_t> io_uring_backend::retry_missing_kernel_cancellations() {
         // arrives.
         if (!detail::io_uring_cancel_retry_required(operation.cancellation.has_value(),
                                                     operation.close_requested,
-                                                    operation.cancel_submitted)) {
+                                                    operation.cancel_request_submitted,
+                                                    operation.cancel_sqe_in_flight)) {
             continue;
         }
         operations_to_retry.push_back(operation_id);
@@ -1181,7 +1190,8 @@ io_result<std::size_t> io_uring_backend::retry_missing_kernel_cancellations() {
         if (found == kernel_operations_.end() ||
             !detail::io_uring_cancel_retry_required(found->second.cancellation.has_value(),
                                                     found->second.close_requested,
-                                                    found->second.cancel_submitted)) {
+                                                    found->second.cancel_request_submitted,
+                                                    found->second.cancel_sqe_in_flight)) {
             continue;
         }
 
@@ -1210,7 +1220,8 @@ std::size_t io_uring_backend::complete_unsubmitted_kernel_submissions(
             kernel_cancel_operation_ids_.erase(submission.operation_id);
             if (auto found = kernel_operations_.find(submission.operation_id);
                 found != kernel_operations_.end()) {
-                found->second.cancel_submitted = false;
+                found->second.cancel_request_submitted = false;
+                found->second.cancel_sqe_in_flight = false;
             }
             continue;
         }
@@ -1295,7 +1306,7 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
             kernel_cancel_operation_ids_.erase(decoded.operation_id);
             if (auto found = kernel_operations_.find(decoded.operation_id);
                 found != kernel_operations_.end()) {
-                found->second.cancel_submitted = false;
+                found->second.cancel_sqe_in_flight = false;
             }
             continue;
         }
@@ -1384,7 +1395,7 @@ io_result<std::size_t> io_uring_backend::observe_test_kernel_completions() {
             kernel_cancel_operation_ids_.erase(cqe.operation_id);
             if (auto found = kernel_operations_.find(cqe.operation_id);
                 found != kernel_operations_.end()) {
-                found->second.cancel_submitted = false;
+                found->second.cancel_sqe_in_flight = false;
             }
             continue;
         }
