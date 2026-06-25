@@ -332,8 +332,9 @@ void_result iocp_backend::request_cancel_for(operation_storage& storage) {
 
 void_result iocp_backend::mark_close_requested(backend_handle_token token) {
     std::vector<std::size_t> operation_ids;
-    for (const auto& [operation_id, storage] : operations_) {
-        if (storage->operation.handle == token) {
+    for (const auto operation_id : operation_submission_order_) {
+        const auto found = operations_.find(operation_id);
+        if (found != operations_.end() && found->second->operation.handle == token) {
             operation_ids.push_back(operation_id);
         }
     }
@@ -366,10 +367,11 @@ void_result iocp_backend::mark_close_requested(backend_handle_token token) {
 
 void_result iocp_backend::mark_shutdown_requested() {
     std::vector<std::size_t> operation_ids;
-    operation_ids.reserve(operations_.size());
-    for (const auto& [operation_id, storage] : operations_) {
-        (void)storage;
-        operation_ids.push_back(operation_id);
+    operation_ids.reserve(operation_submission_order_.size());
+    for (const auto operation_id : operation_submission_order_) {
+        if (operations_.contains(operation_id)) {
+            operation_ids.push_back(operation_id);
+        }
     }
 
     std::optional<vio_error> first_error;
@@ -495,6 +497,7 @@ void iocp_backend::erase_operation_storage(std::size_t operation_id) {
 
     operation_id_by_overlapped_.erase(found->second->overlapped_address());
     operations_.erase(found);
+    std::erase(operation_submission_order_, operation_id);
     maybe_close_stopped_port();
 }
 
@@ -789,6 +792,7 @@ void_result iocp_backend::submit(backend_operation operation) {
     active_operation_ids_.insert(operation.id);
     operation_id_by_overlapped_[overlapped] = operation.id;
     operations_.emplace(operation.id, std::move(storage));
+    operation_submission_order_.push_back(operation.id);
     return {};
 #else
     (void)operation;

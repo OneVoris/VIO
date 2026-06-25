@@ -3,6 +3,7 @@
 #include <voris/io/backend.hpp>
 #include <voris/io/backends/epoll_backend.hpp>
 #include <voris/io/backends/io_uring_backend.hpp>
+#include <voris/io/backends/iocp_backend.hpp>
 #include <voris/io/backends/kqueue_backend.hpp>
 
 #include <array>
@@ -21,6 +22,16 @@
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace vio_backend_contract_tests {
@@ -116,6 +127,9 @@ public:
 private:
     std::size_t next_native_handle_{1};
 };
+
+template <class Fixture>
+inline constexpr bool can_force_same_numeric_handle_reuse = true;
 
 #if defined(__linux__)
 class unique_fd {
@@ -343,6 +357,118 @@ private:
 };
 #endif
 
+#if defined(_WIN32)
+class iocp_unique_handle {
+public:
+    explicit iocp_unique_handle(HANDLE handle = INVALID_HANDLE_VALUE) noexcept
+        : handle_(handle) {}
+
+    ~iocp_unique_handle() {
+        reset();
+    }
+
+    iocp_unique_handle(const iocp_unique_handle&) = delete;
+    iocp_unique_handle& operator=(const iocp_unique_handle&) = delete;
+
+    iocp_unique_handle(iocp_unique_handle&& other) noexcept : handle_(other.release()) {}
+
+    iocp_unique_handle& operator=(iocp_unique_handle&& other) noexcept {
+        if (this != &other) {
+            reset(other.release());
+        }
+        return *this;
+    }
+
+    [[nodiscard]] HANDLE get() const noexcept {
+        return handle_;
+    }
+
+    [[nodiscard]] HANDLE release() noexcept {
+        const HANDLE handle = handle_;
+        handle_ = INVALID_HANDLE_VALUE;
+        return handle;
+    }
+
+    void reset(HANDLE handle = INVALID_HANDLE_VALUE) noexcept {
+        if (handle_ != INVALID_HANDLE_VALUE && handle_ != nullptr) {
+            (void)::CloseHandle(handle_);
+        }
+        handle_ = handle;
+    }
+
+private:
+    HANDLE handle_{INVALID_HANDLE_VALUE};
+};
+
+inline iocp_unique_handle make_iocp_overlapped_temp_file() {
+    std::array<wchar_t, MAX_PATH> directory{};
+    const DWORD directory_length =
+        ::GetTempPathW(static_cast<DWORD>(directory.size()), directory.data());
+    assert(directory_length > 0);
+    assert(directory_length < directory.size());
+
+    std::array<wchar_t, MAX_PATH> path{};
+    assert(::GetTempFileNameW(directory.data(), L"vio", 0, path.data()) != 0);
+
+    iocp_unique_handle file(::CreateFileW(
+        path.data(), GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OVERLAPPED,
+        nullptr));
+    assert(file.get() != INVALID_HANDLE_VALUE);
+    return file;
+}
+
+inline std::size_t iocp_native_handle_value(HANDLE handle) noexcept {
+    return reinterpret_cast<std::size_t>(handle);
+}
+
+class iocp_contract_fixture {
+public:
+    [[nodiscard]] std::size_t make_native_handle() {
+        handles_.push_back(make_iocp_overlapped_temp_file());
+        return iocp_native_handle_value(handles_.back().get());
+    }
+
+    [[nodiscard]] std::size_t invalid_native_handle() const noexcept {
+        return 0;
+    }
+
+    [[nodiscard]] std::size_t recreate_native_handle_with_same_number(
+        std::size_t native_handle) {
+        close_native_handle(native_handle);
+        handles_.push_back(make_iocp_overlapped_temp_file());
+        return iocp_native_handle_value(handles_.back().get());
+    }
+
+    [[nodiscard]] std::size_t expected_poll_count_after_close(
+        std::size_t queued_completions) const noexcept {
+        return queued_completions;
+    }
+
+    void make_pending_completions_visible() noexcept {}
+
+    voris::io::backends::iocp_backend backend{};
+
+private:
+    void close_native_handle(std::size_t native_handle) noexcept {
+        for (auto& handle : handles_) {
+            if (iocp_native_handle_value(handle.get()) == native_handle) {
+                handle.reset();
+                return;
+            }
+        }
+        assert(false);
+    }
+
+    std::vector<iocp_unique_handle> handles_{};
+};
+
+template <>
+inline constexpr bool can_force_same_numeric_handle_reuse<iocp_contract_fixture> = false;
+#endif
+
 inline voris::io::backends::io_uring_capabilities io_uring_contract_capabilities()
     noexcept {
     return voris::io::backends::io_uring_capabilities{
@@ -540,7 +666,7 @@ void test_operation_id_cannot_reuse_until_queued_completion_is_drained() {
 }
 
 template <class Fixture>
-void test_same_numeric_handle_reuse_gets_new_generation_and_rejects_stale_token() {
+void test_handle_reuse_gets_safe_generation_when_possible_and_rejects_stale_token() {
     using namespace voris::io;
 
     Fixture fixture;
@@ -551,8 +677,14 @@ void test_same_numeric_handle_reuse_gets_new_generation_and_rejects_stale_token(
     const auto reused_native = fixture.recreate_native_handle_with_same_number(native_handle);
     const auto reused = require_token(fixture.backend.register_handle(reused_native));
 
-    assert(reused.native_handle == first.native_handle);
-    assert(reused.generation > first.generation);
+    if constexpr (can_force_same_numeric_handle_reuse<Fixture>) {
+        assert(reused.native_handle == first.native_handle);
+        assert(reused.generation > first.generation);
+    } else if (reused.native_handle == first.native_handle) {
+        assert(reused.generation > first.generation);
+    } else {
+        assert(reused.generation == 1);
+    }
 
     assert_void_error(fixture.backend.submit(operation(31, backend_operation_kind::read, first)),
                       vio_error_code::invalid_state);
@@ -613,7 +745,7 @@ void run_backend_contract_suite() {
     test_close_handle_completes_all_pending_operations_once<Fixture>();
     test_close_one_handle_does_not_complete_another_handles_pending_operations<Fixture>();
     test_operation_id_cannot_reuse_until_queued_completion_is_drained<Fixture>();
-    test_same_numeric_handle_reuse_gets_new_generation_and_rejects_stale_token<Fixture>();
+    test_handle_reuse_gets_safe_generation_when_possible_and_rejects_stale_token<Fixture>();
     test_shutdown_rejects_new_work_and_drains_pending_as_closed<Fixture>();
     test_drain_empty_and_empty_span_behavior<Fixture>();
 }
@@ -669,6 +801,46 @@ inline void run_kqueue_backend_contract_suite() {
     using namespace voris::io;
 
     backends::kqueue_backend backend;
+    assert_token_error(backend.register_handle(1), vio_error_code::unsupported);
+    assert_void_error(backend.submit(operation(1, backend_operation_kind::read, {1, 1})),
+                      vio_error_code::unsupported);
+    assert_void_error(backend.cancel(1, cancellation_reason::manual), vio_error_code::unsupported);
+    assert_void_error(backend.close_handle({1, 1}), vio_error_code::unsupported);
+    assert_size_error(backend.poll(), vio_error_code::unsupported);
+    std::array<backend_completion, 1> completions{};
+    assert_size_error(backend.drain_completions(completions), vio_error_code::unsupported);
+    assert_void_error(backend.wake(), vio_error_code::unsupported);
+    assert(backend.shutdown().has_value());
+#endif
+}
+
+inline void run_iocp_backend_contract_suite() {
+#if defined(_WIN32)
+    run_backend_contract_suite<iocp_contract_fixture>();
+
+    using namespace voris::io;
+
+    iocp_contract_fixture fixture;
+    const auto token = require_token(fixture.backend.register_handle(fixture.make_native_handle()));
+    assert(fixture.backend.submit(file_operation(254, backend_operation_kind::read, token))
+               .has_value());
+    assert(fixture.backend.submit(file_operation(255, backend_operation_kind::write, token))
+               .has_value());
+    assert(fixture.backend.submit(file_operation(256, backend_operation_kind::fsync, token))
+               .has_value());
+
+    assert(fixture.backend.close_handle(token).has_value());
+    assert_poll_count(fixture.backend, fixture.expected_poll_count_after_close(3));
+
+    std::array<backend_completion, 4> completions{};
+    assert(drain(fixture.backend, completions) == 3);
+    assert_completion_error(completions[0], 254, vio_error_code::closed);
+    assert_completion_error(completions[1], 255, vio_error_code::closed);
+    assert_completion_error(completions[2], 256, vio_error_code::closed);
+#else
+    using namespace voris::io;
+
+    backends::iocp_backend backend;
     assert_token_error(backend.register_handle(1), vio_error_code::unsupported);
     assert_void_error(backend.submit(operation(1, backend_operation_kind::read, {1, 1})),
                       vio_error_code::unsupported);
