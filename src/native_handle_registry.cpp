@@ -2,8 +2,18 @@
 
 namespace voris::io::detail {
 
-native_handle_token native_handle_registry::register_handle(std::size_t native_handle) {
+io_result<native_handle_token> native_handle_registry::register_handle(std::size_t native_handle) {
+    if (native_handle == 0) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "native handle id must be non-zero"));
+    }
+
     auto& entry = entries_[native_handle];
+    if (entry.open) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "native handle is already registered"));
+    }
+
     ++entry.generation;
     entry.open = true;
     return native_handle_token{native_handle, entry.generation};

@@ -2,7 +2,7 @@
 
 namespace voris::io::backends {
 
-void_result iocp_backend::register_handle(std::size_t native_handle) {
+io_result<backend_handle_token> iocp_backend::register_handle(std::size_t native_handle) {
 #if defined(_WIN32)
     return fallback_.register_handle(native_handle);
 #else
@@ -33,10 +33,31 @@ void_result iocp_backend::cancel(std::size_t operation_id, cancellation_reason r
 #endif
 }
 
+void_result iocp_backend::close_handle(backend_handle_token token) {
+#if defined(_WIN32)
+    return fallback_.close_handle(token);
+#else
+    (void)token;
+    return std::unexpected(make_error(vio_error_code::unsupported,
+                                      "IOCP backend is unavailable"));
+#endif
+}
+
 io_result<std::size_t> iocp_backend::poll() {
 #if defined(_WIN32)
     return fallback_.poll();
 #else
+    return std::unexpected(make_error(vio_error_code::unsupported,
+                                      "IOCP backend is unavailable"));
+#endif
+}
+
+io_result<std::size_t> iocp_backend::drain_completions(
+    std::span<backend_completion> out) {
+#if defined(_WIN32)
+    return fallback_.drain_completions(out);
+#else
+    (void)out;
     return std::unexpected(make_error(vio_error_code::unsupported,
                                       "IOCP backend is unavailable"));
 #endif

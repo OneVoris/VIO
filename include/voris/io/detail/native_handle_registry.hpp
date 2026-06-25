@@ -14,7 +14,7 @@ struct native_handle_token {
 
 class native_handle_registry {
 public:
-    [[nodiscard]] native_handle_token register_handle(std::size_t native_handle);
+    [[nodiscard]] io_result<native_handle_token> register_handle(std::size_t native_handle);
     [[nodiscard]] void_result close(native_handle_token token);
     [[nodiscard]] bool is_current(native_handle_token token) const noexcept;
     [[nodiscard]] std::size_t generation(std::size_t native_handle) const noexcept;

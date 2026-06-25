@@ -1,6 +1,21 @@
 #include <voris/io/backends/iocp_backend.hpp>
 
+#include <array>
+
 #include "test_assert.hpp"
+
+namespace {
+
+voris::io::backend_operation operation(std::size_t id,
+                                       voris::io::backend_handle_token token) {
+    voris::io::backend_operation result{};
+    result.id = id;
+    result.kind = voris::io::backend_operation_kind::read;
+    result.handle = token;
+    return result;
+}
+
+} // namespace
 
 int main() {
     using namespace voris::io;
@@ -12,10 +27,16 @@ int main() {
 
     backends::iocp_backend backend;
 #if defined(_WIN32)
-    assert(backend.register_handle(1).has_value());
-    assert(backend.submit(backend_operation{1, backend_operation_kind::read, {}}).has_value());
+    auto token = backend.register_handle(1);
+    assert(token.has_value());
+    assert(backend.submit(operation(1, *token)).has_value());
     assert(backend.cancel(1, cancellation_reason::manual).has_value());
     assert(backend.poll().has_value());
+    assert(backend.close_handle(*token).has_value());
+    std::array<backend_completion, 2> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
 #else
     auto result = backend.register_handle(1);
     assert(!result.has_value());

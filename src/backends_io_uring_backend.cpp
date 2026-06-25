@@ -31,7 +31,7 @@ bool io_uring_backend::default_eligible() const noexcept {
            capabilities_.supports_files;
 }
 
-void_result io_uring_backend::register_handle(std::size_t native_handle) {
+io_result<backend_handle_token> io_uring_backend::register_handle(std::size_t native_handle) {
     if (!capabilities_.available) {
         return std::unexpected(make_error(vio_error_code::unsupported,
                                           "io_uring is unavailable"));
@@ -55,12 +55,29 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
     return fallback_.cancel(operation_id, reason);
 }
 
+void_result io_uring_backend::close_handle(backend_handle_token token) {
+    if (!capabilities_.available) {
+        return std::unexpected(make_error(vio_error_code::unsupported,
+                                          "io_uring is unavailable"));
+    }
+    return fallback_.close_handle(token);
+}
+
 io_result<std::size_t> io_uring_backend::poll() {
     if (!capabilities_.available) {
         return std::unexpected(make_error(vio_error_code::unsupported,
                                           "io_uring is unavailable"));
     }
     return fallback_.poll();
+}
+
+io_result<std::size_t> io_uring_backend::drain_completions(
+    std::span<backend_completion> out) {
+    if (!capabilities_.available) {
+        return std::unexpected(make_error(vio_error_code::unsupported,
+                                          "io_uring is unavailable"));
+    }
+    return fallback_.drain_completions(out);
 }
 
 void_result io_uring_backend::wake() {

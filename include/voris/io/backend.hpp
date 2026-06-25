@@ -1,12 +1,20 @@
 #pragma once
 
 #include <cstddef>
+#include <deque>
+#include <span>
+#include <vector>
 
 #include <voris/io/cancellation.hpp>
+#include <voris/io/detail/native_handle_registry.hpp>
 #include <voris/io/error.hpp>
 #include <voris/io/scheduler.hpp>
 
 namespace voris::io {
+
+namespace backends {
+class epoll_backend;
+} // namespace backends
 
 enum class backend_operation_kind {
     read,
@@ -17,10 +25,19 @@ enum class backend_operation_kind {
     wake,
 };
 
+struct backend_handle_token {
+    std::size_t native_handle{};
+    std::size_t generation{};
+
+    [[nodiscard]] friend bool operator==(backend_handle_token lhs,
+                                         backend_handle_token rhs) noexcept = default;
+};
+
 struct backend_operation {
     std::size_t id{};
     backend_operation_kind kind{};
     scheduler_ref scheduler{};
+    backend_handle_token handle{};
 };
 
 struct backend_completion {
@@ -32,22 +49,30 @@ class backend {
 public:
     virtual ~backend() = default;
 
-    [[nodiscard]] virtual void_result register_handle(std::size_t native_handle) = 0;
+    [[nodiscard]] virtual io_result<backend_handle_token> register_handle(
+        std::size_t native_handle) = 0;
     [[nodiscard]] virtual void_result submit(backend_operation operation) = 0;
     [[nodiscard]] virtual void_result cancel(std::size_t operation_id,
                                              cancellation_reason reason) = 0;
+    [[nodiscard]] virtual void_result close_handle(backend_handle_token token) = 0;
     [[nodiscard]] virtual io_result<std::size_t> poll() = 0;
+    [[nodiscard]] virtual io_result<std::size_t> drain_completions(
+        std::span<backend_completion> out) = 0;
     [[nodiscard]] virtual void_result wake() = 0;
     [[nodiscard]] virtual void_result shutdown() = 0;
 };
 
 class virtual_backend final : public backend {
 public:
-    [[nodiscard]] void_result register_handle(std::size_t native_handle) override;
+    [[nodiscard]] io_result<backend_handle_token> register_handle(
+        std::size_t native_handle) override;
     [[nodiscard]] void_result submit(backend_operation operation) override;
     [[nodiscard]] void_result cancel(std::size_t operation_id,
                                      cancellation_reason reason) override;
+    [[nodiscard]] void_result close_handle(backend_handle_token token) override;
     [[nodiscard]] io_result<std::size_t> poll() override;
+    [[nodiscard]] io_result<std::size_t> drain_completions(
+        std::span<backend_completion> out) override;
     [[nodiscard]] void_result wake() override;
     [[nodiscard]] void_result shutdown() override;
 
@@ -56,6 +81,19 @@ public:
     [[nodiscard]] bool stopped() const noexcept;
 
 private:
+    friend class backends::epoll_backend;
+
+    struct pending_operation {
+        backend_operation operation{};
+    };
+
+    [[nodiscard]] bool is_current_handle(backend_handle_token token) const noexcept;
+    [[nodiscard]] void_result complete_ready(backend_handle_token token);
+    void complete_pending(backend_handle_token token, const void_result& result);
+
+    detail::native_handle_registry registry_{};
+    std::vector<pending_operation> pending_{};
+    std::deque<backend_completion> completions_{};
     std::size_t registered_{0};
     std::size_t submitted_{0};
     std::size_t cancelled_{0};
