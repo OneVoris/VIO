@@ -17,6 +17,8 @@ namespace {
 
 constexpr unsigned uapi_op_read = 22U;
 constexpr unsigned uapi_op_write = 23U;
+constexpr unsigned uapi_op_readv = 1U;
+constexpr unsigned uapi_op_writev = 2U;
 constexpr unsigned uapi_op_fsync = 3U;
 constexpr unsigned uapi_op_read_fixed = 4U;
 constexpr unsigned uapi_op_write_fixed = 5U;
@@ -184,6 +186,39 @@ void test_probe_files_require_read_write_and_fsync() {
         assert(caps.supports_write);
         assert(!caps.supports_fsync);
         assert(!caps.supports_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_readv};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(caps.supports_read);
+        assert(!caps.supports_write);
+        assert(!caps.supports_fsync);
+        assert(!caps.supports_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_writev};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(!caps.supports_read);
+        assert(caps.supports_write);
+        assert(!caps.supports_fsync);
+        assert(!caps.supports_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_readv, uapi_op_writev, uapi_op_fsync};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(caps.supports_read);
+        assert(caps.supports_write);
+        assert(caps.supports_fsync);
+        assert(caps.supports_files);
     }
 }
 
