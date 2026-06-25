@@ -324,6 +324,11 @@ bool io_uring_completion_should_report_closed(backend_operation_target target,
            io_uring_completion_result_class::closed;
 }
 
+void attach_io_uring_test_kernel(io_uring_backend& backend,
+                                 io_uring_test_kernel& kernel) noexcept {
+    backend.test_kernel_ = &kernel;
+}
+
 } // namespace detail
 
 io_uring_capabilities detect_io_uring_capabilities() noexcept {
@@ -676,7 +681,8 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
             if (found->second.cancel_submitted) {
                 return {};
             }
-            return request_kernel_cancellation_for(operation_id, found->second);
+            (void)request_kernel_cancellation_for(operation_id, found->second);
+            return {};
         }
     }
     return fallback_.cancel(operation_id, reason);
@@ -815,6 +821,10 @@ bool io_uring_backend::use_kernel_submission() const noexcept {
     return options_.enable_kernel_submission;
 }
 
+bool io_uring_backend::use_test_kernel_submission() const noexcept {
+    return test_kernel_ != nullptr;
+}
+
 bool io_uring_backend::has_inflight_kernel_work() const noexcept {
     return !kernel_operations_.empty() || !kernel_cancel_operation_ids_.empty();
 }
@@ -892,6 +902,9 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
     const backend_operation& operation = queued.operation;
     if (auto valid = validate_kernel_operation(operation); !valid.has_value()) {
         return valid;
+    }
+    if (use_test_kernel_submission()) {
+        return submit_to_test_kernel(operation);
     }
 
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
@@ -991,6 +1004,13 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
 #endif
 }
 
+void_result io_uring_backend::submit_to_test_kernel(
+    const backend_operation& operation) {
+    kernel_operations_.emplace(operation.id,
+                               io_uring_backend::kernel_operation{.operation = operation});
+    return {};
+}
+
 void_result io_uring_backend::request_kernel_cancellations_for(
     backend_handle_token token) {
     if (kernel_operations_.empty()) {
@@ -1018,10 +1038,7 @@ void_result io_uring_backend::request_kernel_cancellations_for(
         if (found == kernel_operations_.end() || found->second.cancel_submitted) {
             continue;
         }
-        if (auto cancelled = request_kernel_cancellation_for(operation_id, found->second);
-            !cancelled.has_value()) {
-            return cancelled;
-        }
+        (void)request_kernel_cancellation_for(operation_id, found->second);
     }
 
     return {};
@@ -1030,6 +1047,10 @@ void_result io_uring_backend::request_kernel_cancellations_for(
 void_result io_uring_backend::request_kernel_cancellation_for(
     std::size_t operation_id,
     kernel_operation& operation) {
+    if (use_test_kernel_submission()) {
+        return request_test_kernel_cancellation_for(operation_id, operation);
+    }
+
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
     if (!kernel_ring_) {
         return std::unexpected(
@@ -1075,6 +1096,22 @@ void_result io_uring_backend::request_kernel_cancellation_for(
     (void)operation;
     return std::unexpected(unavailable_error());
 #endif
+}
+
+void_result io_uring_backend::request_test_kernel_cancellation_for(
+    std::size_t operation_id,
+    kernel_operation& operation) {
+    auto& kernel = *test_kernel_;
+    if (kernel.cancel_submission_failures != 0U) {
+        --kernel.cancel_submission_failures;
+        return std::unexpected(make_error(vio_error_code::resource_exhausted,
+                                          "test io_uring cancel SQE is unavailable"));
+    }
+
+    operation.cancel_submitted = true;
+    kernel_cancel_operation_ids_.insert(operation_id);
+    kernel.submitted_cancel_operation_ids.push_back(operation_id);
+    return {};
 }
 
 io_result<std::size_t> io_uring_backend::flush_submission_batch() {
@@ -1123,7 +1160,6 @@ io_result<std::size_t> io_uring_backend::progress_kernel_submissions() {
 }
 
 io_result<std::size_t> io_uring_backend::retry_missing_kernel_cancellations() {
-#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
     std::size_t visible = 0;
     std::vector<std::size_t> operations_to_retry{};
     operations_to_retry.reserve(kernel_operations_.size());
@@ -1151,19 +1187,16 @@ io_result<std::size_t> io_uring_backend::retry_missing_kernel_cancellations() {
 
         auto retried = request_kernel_cancellation_for(operation_id, found->second);
         if (!retried.has_value()) {
-            return std::unexpected(retried.error());
+            continue;
         }
 
         auto progressed = progress_kernel_submissions();
         if (!progressed.has_value()) {
-            return std::unexpected(progressed.error());
+            continue;
         }
         visible += *progressed;
     }
     return visible;
-#else
-    return 0U;
-#endif
 }
 
 std::size_t io_uring_backend::complete_unsubmitted_kernel_submissions(
@@ -1234,6 +1267,10 @@ io_result<std::size_t> io_uring_backend::observe_completion_batch() {
 }
 
 io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
+    if (use_test_kernel_submission()) {
+        return observe_test_kernel_completions();
+    }
+
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
     if (!kernel_ring_) {
         return 0U;
@@ -1326,6 +1363,78 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
 #else
     return std::unexpected(unavailable_error());
 #endif
+}
+
+io_result<std::size_t> io_uring_backend::observe_test_kernel_completions() {
+    auto retried = retry_missing_kernel_cancellations();
+    if (!retried.has_value()) {
+        return std::unexpected(retried.error());
+    }
+
+    auto& kernel = *test_kernel_;
+    const std::size_t count =
+        std::min(options_.completion_batch_limit, kernel.completions.size());
+    std::size_t visible = *retried;
+
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto cqe = kernel.completions.front();
+        kernel.completions.pop_front();
+
+        if (cqe.kind == detail::io_uring_test_completion_kind::cancel_ack) {
+            kernel_cancel_operation_ids_.erase(cqe.operation_id);
+            if (auto found = kernel_operations_.find(cqe.operation_id);
+                found != kernel_operations_.end()) {
+                found->second.cancel_submitted = false;
+            }
+            continue;
+        }
+
+        const auto found = kernel_operations_.find(cqe.operation_id);
+        if (found == kernel_operations_.end()) {
+            continue;
+        }
+
+        const auto operation = found->second;
+        kernel_operations_.erase(found);
+
+        backend_completion completion{};
+        completion.operation_id = cqe.operation_id;
+        const bool handle_current = fallback_.is_current_handle(operation.operation.handle);
+        const auto result_class = detail::io_uring_completion_result_for(
+            operation.operation.target, operation.cancellation.has_value(),
+            operation.close_requested, handle_current, cqe.result);
+        if (result_class == detail::io_uring_completion_result_class::cancelled) {
+            completion.result = cancelled_completion(*operation.cancellation);
+        } else if (result_class == detail::io_uring_completion_result_class::closed) {
+            completion.result = closed_completion();
+        } else if (cqe.result < 0) {
+            completion.result = std::unexpected(provider_failure(-cqe.result));
+        } else {
+            switch (operation.operation.kind) {
+            case backend_operation_kind::read:
+            case backend_operation_kind::write:
+                completion.bytes_transferred = static_cast<std::size_t>(cqe.result);
+                break;
+            case backend_operation_kind::accept:
+                completion.accepted_native_handle = static_cast<std::size_t>(cqe.result);
+                break;
+            case backend_operation_kind::connect:
+                break;
+            case backend_operation_kind::fsync:
+                break;
+            case backend_operation_kind::close:
+            case backend_operation_kind::wake:
+                completion.result = std::unexpected(invalid_state_error(
+                    "unexpected non-I/O test io_uring completion"));
+                break;
+            }
+        }
+
+        completion_queue_.push_back(std::move(completion));
+        ++visible;
+    }
+
+    return visible;
 }
 
 void_result io_uring_backend::drain_fallback_completions() {

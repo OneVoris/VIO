@@ -140,6 +140,16 @@ void assert_completion_error(const voris::io::backend_completion& completion,
     assert(completion.result.error().classification == expected);
 }
 
+void assert_backend_failure_code(const voris::io::backend_completion& completion,
+                                 std::size_t operation_id,
+                                 int expected_provider_code) {
+    assert(completion.operation_id == operation_id);
+    assert(!completion.result.has_value());
+    assert(completion.result.error().classification == voris::io::vio_error_code::backend_failure);
+    assert(completion.result.error().provider_code.has_value());
+    assert(*completion.result.error().provider_code == expected_provider_code);
+}
+
 void assert_drained_closed_completion(voris::io::backend_completion completion,
                                       std::size_t operation_id) {
     assert_completion_error(completion, operation_id, voris::io::vio_error_code::closed);
@@ -211,6 +221,22 @@ voris::io::backends::io_uring_backend_options deterministic_options(
         .completion_batch_limit = completion_batch_limit,
         .enable_kernel_submission = false,
     };
+}
+
+voris::io::backends::io_uring_backend_options test_kernel_options(
+    std::size_t completion_batch_limit = 32) {
+    return voris::io::backends::io_uring_backend_options{
+        .submission_queue_capacity = 16,
+        .submit_batch_limit = 8,
+        .completion_batch_limit = completion_batch_limit,
+        .enable_kernel_submission = true,
+    };
+}
+
+void attach_test_kernel(
+    voris::io::backends::io_uring_backend& backend,
+    voris::io::backends::detail::io_uring_test_kernel& kernel) noexcept {
+    voris::io::backends::detail::attach_io_uring_test_kernel(backend, kernel);
 }
 
 void test_backend_contract_carries_socket_payloads_and_results() {
@@ -1570,6 +1596,244 @@ void test_kernel_mode_queued_cancellation_completes_cancelled_once() {
     assert_completion_error(completions[0], 101, voris::io::vio_error_code::closed);
 }
 
+void test_active_cancel_retries_after_transient_cancel_submission_failure() {
+    using voris::io::backends::detail::io_uring_test_completion;
+    using voris::io::backends::detail::io_uring_test_completion_kind;
+
+    voris::io::backends::detail::io_uring_test_kernel kernel{};
+    kernel.cancel_submission_failures = 1;
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), test_kernel_options());
+    attach_test_kernel(backend, kernel);
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert(backend.submit(read_operation(301, *token, output)).has_value());
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+
+    assert(backend.cancel(301, voris::io::cancellation_reason::manual).has_value());
+    assert(kernel.submitted_cancel_operation_ids.empty());
+
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert(kernel.submitted_cancel_operation_ids.size() == 1);
+    assert(kernel.submitted_cancel_operation_ids[0] == 301);
+
+    kernel.completions.push_back(
+        io_uring_test_completion{io_uring_test_completion_kind::operation,
+                                 301,
+                                 io_uring_canceled_result});
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+
+    std::array<voris::io::backend_completion, 1> completions{};
+    const auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_completion_error(completions[0], 301, voris::io::vio_error_code::cancelled);
+}
+
+void test_close_and_shutdown_retry_after_transient_cancel_submission_failure() {
+    using voris::io::backends::detail::io_uring_test_completion;
+    using voris::io::backends::detail::io_uring_test_completion_kind;
+
+    {
+        voris::io::backends::detail::io_uring_test_kernel kernel{};
+        kernel.cancel_submission_failures = 1;
+        voris::io::backends::io_uring_backend backend(
+            core_capabilities(), test_kernel_options());
+        attach_test_kernel(backend, kernel);
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+
+        std::array<std::byte, 1> output{};
+        assert(backend.submit(read_operation(311, *token, output)).has_value());
+        auto polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 0);
+
+        assert(backend.close_handle(*token).has_value());
+        assert(kernel.submitted_cancel_operation_ids.empty());
+
+        polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 0);
+        assert(kernel.submitted_cancel_operation_ids.size() == 1);
+        assert(kernel.submitted_cancel_operation_ids[0] == 311);
+
+        kernel.completions.push_back(
+            io_uring_test_completion{io_uring_test_completion_kind::operation,
+                                     311,
+                                     io_uring_canceled_result});
+        polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 1);
+
+        std::array<voris::io::backend_completion, 1> completions{};
+        const auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 1);
+        assert_completion_error(completions[0], 311, voris::io::vio_error_code::closed);
+    }
+
+    {
+        voris::io::backends::detail::io_uring_test_kernel kernel{};
+        kernel.cancel_submission_failures = 1;
+        voris::io::backends::io_uring_backend backend(
+            core_capabilities(), test_kernel_options());
+        attach_test_kernel(backend, kernel);
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+
+        std::array<std::byte, 1> output{};
+        assert(backend.submit(read_operation(312, *token, output)).has_value());
+        auto polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 0);
+
+        assert(backend.shutdown().has_value());
+        assert(kernel.submitted_cancel_operation_ids.empty());
+
+        polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 0);
+        assert(kernel.submitted_cancel_operation_ids.size() == 1);
+        assert(kernel.submitted_cancel_operation_ids[0] == 312);
+
+        kernel.completions.push_back(
+            io_uring_test_completion{io_uring_test_completion_kind::operation,
+                                     312,
+                                     io_uring_canceled_result});
+        polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 1);
+
+        std::array<voris::io::backend_completion, 1> completions{};
+        const auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 1);
+        assert_completion_error(completions[0], 312, voris::io::vio_error_code::closed);
+    }
+}
+
+void test_cancel_ack_cqes_are_cleanup_only_around_original_completion() {
+    using voris::io::backends::detail::io_uring_test_completion;
+    using voris::io::backends::detail::io_uring_test_completion_kind;
+
+    voris::io::backends::detail::io_uring_test_kernel kernel{};
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), test_kernel_options());
+    attach_test_kernel(backend, kernel);
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert(backend.submit(read_operation(321, *token, output)).has_value());
+    assert(backend.poll().has_value());
+    assert(backend.cancel(321, voris::io::cancellation_reason::manual).has_value());
+
+    kernel.completions.push_back(
+        io_uring_test_completion{io_uring_test_completion_kind::cancel_ack, 321, 0});
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    std::array<voris::io::backend_completion, 1> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 0);
+
+    kernel.completions.push_back(
+        io_uring_test_completion{io_uring_test_completion_kind::operation,
+                                 321,
+                                 io_uring_canceled_result});
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_completion_error(completions[0], 321, voris::io::vio_error_code::cancelled);
+
+    kernel.completions.push_back(
+        io_uring_test_completion{io_uring_test_completion_kind::cancel_ack, 321, 0});
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 0);
+}
+
+void test_original_cqe_result_wins_after_manual_cancel_request() {
+    using voris::io::backends::detail::io_uring_test_completion;
+    using voris::io::backends::detail::io_uring_test_completion_kind;
+
+    {
+        voris::io::backends::detail::io_uring_test_kernel kernel{};
+        voris::io::backends::io_uring_backend backend(
+            core_capabilities(), test_kernel_options());
+        attach_test_kernel(backend, kernel);
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+
+        std::array<std::byte, 4> output{};
+        assert(backend.submit(read_operation(331, *token, output)).has_value());
+        assert(backend.poll().has_value());
+        assert(backend.cancel(331, voris::io::cancellation_reason::manual).has_value());
+
+        kernel.completions.push_back(
+            io_uring_test_completion{io_uring_test_completion_kind::operation, 331, 3});
+        auto polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 1);
+
+        std::array<voris::io::backend_completion, 1> completions{};
+        auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 1);
+        assert(completions[0].operation_id == 331);
+        assert(completions[0].result.has_value());
+        assert(completions[0].bytes_transferred == 3);
+
+        kernel.completions.push_back(
+            io_uring_test_completion{io_uring_test_completion_kind::cancel_ack, 331, 0});
+        polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 0);
+    }
+
+    {
+        voris::io::backends::detail::io_uring_test_kernel kernel{};
+        voris::io::backends::io_uring_backend backend(
+            core_capabilities(), test_kernel_options());
+        attach_test_kernel(backend, kernel);
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+
+        std::array<std::byte, 1> output{};
+        assert(backend.submit(read_operation(332, *token, output)).has_value());
+        assert(backend.poll().has_value());
+        assert(backend.cancel(332, voris::io::cancellation_reason::manual).has_value());
+
+        kernel.completions.push_back(
+            io_uring_test_completion{io_uring_test_completion_kind::operation, 332, -5});
+        auto polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 1);
+
+        std::array<voris::io::backend_completion, 1> completions{};
+        const auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 1);
+        assert_backend_failure_code(completions[0], 332, 5);
+    }
+}
+
 void test_kernel_submission_requires_cancel_capability_for_close_liveness() {
     auto caps = core_capabilities();
     caps.supports_cancel = false;
@@ -2096,6 +2360,10 @@ int main() {
     test_submission_queue_is_bounded();
     test_queued_operation_can_be_cancelled_before_flush();
     test_kernel_mode_queued_cancellation_completes_cancelled_once();
+    test_active_cancel_retries_after_transient_cancel_submission_failure();
+    test_close_and_shutdown_retry_after_transient_cancel_submission_failure();
+    test_cancel_ack_cqes_are_cleanup_only_around_original_completion();
+    test_original_cqe_result_wins_after_manual_cancel_request();
     test_kernel_submission_requires_cancel_capability_for_close_liveness();
     test_kernel_submit_rejects_invalid_payloads_immediately();
     test_pending_submission_failure_resolves_only_unsubmitted_tail();

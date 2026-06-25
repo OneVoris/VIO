@@ -6,10 +6,13 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include <voris/io/backend.hpp>
 
 namespace voris::io::backends {
+
+class io_uring_backend;
 
 struct io_uring_capabilities {
     bool available{};
@@ -59,6 +62,23 @@ struct pending_io_uring_submission {
     std::size_t operation_id{};
 };
 
+enum class io_uring_test_completion_kind {
+    operation,
+    cancel_ack,
+};
+
+struct io_uring_test_completion {
+    io_uring_test_completion_kind kind{};
+    std::size_t operation_id{};
+    int result{};
+};
+
+struct io_uring_test_kernel {
+    std::size_t cancel_submission_failures{};
+    std::deque<io_uring_test_completion> completions{};
+    std::vector<std::size_t> submitted_cancel_operation_ids{};
+};
+
 void discard_submitted_io_uring_submissions(
     std::deque<pending_io_uring_submission>& pending,
     unsigned submitted_count) noexcept;
@@ -80,6 +100,9 @@ take_unsubmitted_io_uring_submissions(
     bool close_requested,
     bool handle_current,
     int cqe_result) noexcept;
+void attach_io_uring_test_kernel(
+    io_uring_backend& backend,
+    io_uring_test_kernel& kernel) noexcept;
 
 } // namespace detail
 
@@ -110,6 +133,10 @@ public:
     [[nodiscard]] void_result register_files(std::size_t count);
 
 private:
+    friend void detail::attach_io_uring_test_kernel(
+        io_uring_backend& backend,
+        detail::io_uring_test_kernel& kernel) noexcept;
+
     struct queued_submission {
         backend_operation operation{};
     };
@@ -122,14 +149,19 @@ private:
     struct kernel_ring;
 
     [[nodiscard]] bool use_kernel_submission() const noexcept;
+    [[nodiscard]] bool use_test_kernel_submission() const noexcept;
     [[nodiscard]] bool has_inflight_kernel_work() const noexcept;
     [[nodiscard]] void_result validate_kernel_operation(
         const backend_operation& operation) const;
     [[nodiscard]] void_result submit_to_fallback(queued_submission queued);
     [[nodiscard]] void_result submit_to_kernel(const queued_submission& queued);
+    [[nodiscard]] void_result submit_to_test_kernel(const backend_operation& operation);
     [[nodiscard]] void_result request_kernel_cancellations_for(
         backend_handle_token token);
     [[nodiscard]] void_result request_kernel_cancellation_for(
+        std::size_t operation_id,
+        kernel_operation& operation);
+    [[nodiscard]] void_result request_test_kernel_cancellation_for(
         std::size_t operation_id,
         kernel_operation& operation);
     [[nodiscard]] io_result<std::size_t> progress_kernel_submissions();
@@ -138,6 +170,7 @@ private:
     [[nodiscard]] io_result<std::size_t> flush_submission_batch();
     [[nodiscard]] io_result<std::size_t> observe_completion_batch();
     [[nodiscard]] io_result<std::size_t> observe_kernel_completions();
+    [[nodiscard]] io_result<std::size_t> observe_test_kernel_completions();
     [[nodiscard]] void_result drain_fallback_completions();
     [[nodiscard]] void_result flush_queued_submissions_for(backend_handle_token token);
     void complete_queued_submissions_for(backend_handle_token token,
@@ -153,6 +186,7 @@ private:
     std::unordered_map<std::size_t, kernel_operation> kernel_operations_{};
     std::unordered_set<std::size_t> kernel_cancel_operation_ids_{};
     std::unordered_set<std::size_t> active_operation_ids_{};
+    detail::io_uring_test_kernel* test_kernel_{};
     std::size_t registered_buffers_{0};
     std::size_t registered_files_{0};
     bool closed_{false};
