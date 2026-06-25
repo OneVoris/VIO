@@ -196,11 +196,96 @@ void test_async_submit_failure_reports_executor_error() {
     std::filesystem::remove(path);
 }
 
-void test_async_open_failure_is_returned_as_result() {
+void test_async_file_operation_reports_resource_exhausted_when_queue_is_full() {
+    using namespace voris::io;
+
+    const auto path = temp_file("saturated_pool");
+    std::filesystem::remove(path);
+
+    blocking_executor executor(1, 1);
+    shard owner;
+    manual_gate blocker;
+    block_worker(executor, blocker);
+
+    auto filled = executor.submit([] {});
+    assert(filled.has_value());
+    assert(executor.queued() == 1);
+
+    {
+        current_scheduler_scope scope(owner.scheduler());
+        auto opened = file::async_open(executor, path, file_open_mode::write);
+        assert(opened.is_ready());
+        auto result = std::move(opened).take_result();
+        assert(!result.has_value());
+        assert(result.error().classification == vio_error_code::resource_exhausted);
+    }
+
+    assert(!std::filesystem::exists(path));
+
+    blocker.release();
+    executor.shutdown();
+    std::filesystem::remove(path);
+}
+
+void test_executor_shutdown_drains_queued_file_work() {
+    using namespace voris::io;
+
+    const auto path = temp_file("shutdown_drains");
+    std::filesystem::remove(path);
+
+    auto opened = file::open(path, file_open_mode::write);
+    assert(opened.has_value());
+    auto current = std::move(*opened);
+
+    blocking_executor executor(1, 2);
+    shard owner;
+    manual_gate blocker;
+    block_worker(executor, blocker);
+
+    std::array<std::byte, 3> data{
+        std::byte{'d'}, std::byte{'r'}, std::byte{'n'}};
+
+    task<std::size_t> written;
+    {
+        current_scheduler_scope scope(owner.scheduler());
+        written = current.async_write_at(executor, 0, data);
+    }
+
+    assert(!written.is_ready());
+    assert(executor.queued() == 1);
+    auto initial_size = current.size();
+    assert(initial_size.has_value());
+    assert(*initial_size == 0);
+
+    std::thread shutdown_thread([&] { executor.shutdown(); });
+    assert(wait_until([&] { return executor.shutting_down(); }));
+    assert(!written.is_ready());
+
+    blocker.release();
+    shutdown_thread.join();
+
+    pump_until_ready(owner, written);
+    auto write_result = std::move(written).take_result();
+    assert(write_result.has_value());
+    assert(*write_result == data.size());
+
+    auto read_back = current.read_at(0, data.size());
+    assert(read_back.has_value());
+    assert(read_back->size() == data.size());
+    assert((*read_back)[0] == std::byte{'d'});
+    assert((*read_back)[1] == std::byte{'r'});
+    assert((*read_back)[2] == std::byte{'n'});
+
+    assert(current.close().has_value());
+    std::filesystem::remove(path);
+}
+
+void test_async_open_missing_read_reports_disk_backend_failure() {
     using namespace voris::io;
 
     const auto path = temp_file("missing_read");
     std::filesystem::remove(path);
+    assert(!std::filesystem::exists(path));
 
     blocking_executor executor(1, 1);
     shard owner;
@@ -218,6 +303,113 @@ void test_async_open_failure_is_returned_as_result() {
     assert(result.error().classification == vio_error_code::backend_failure);
 
     executor.shutdown();
+    std::filesystem::remove(path);
+}
+
+void test_async_read_past_eof_returns_short_buffer() {
+    using namespace voris::io;
+
+    const auto path = temp_file("short_read");
+    std::filesystem::remove(path);
+
+    auto opened = file::open(path, file_open_mode::write);
+    assert(opened.has_value());
+    auto current = std::move(*opened);
+
+    std::array<std::byte, 4> data{
+        std::byte{'V'}, std::byte{'I'}, std::byte{'O'}, std::byte{'!'}};
+    auto written = current.write_at(0, data);
+    assert(written.has_value());
+    assert(*written == data.size());
+    assert(current.sync_all().has_value());
+
+    blocking_executor executor(1, 2);
+    shard owner;
+
+    {
+        current_scheduler_scope scope(owner.scheduler());
+        auto short_read = current.async_read_at(executor, 2, 16);
+        pump_until_ready(owner, short_read);
+        auto result = std::move(short_read).take_result();
+        assert(result.has_value());
+        assert(result->size() == 2);
+        assert((*result)[0] == std::byte{'O'});
+        assert((*result)[1] == std::byte{'!'});
+    }
+
+    {
+        current_scheduler_scope scope(owner.scheduler());
+        auto past_eof = current.async_read_at(executor, 32, 8);
+        pump_until_ready(owner, past_eof);
+        auto result = std::move(past_eof).take_result();
+        assert(result.has_value());
+        assert(result->empty());
+    }
+
+    executor.shutdown();
+    assert(current.close().has_value());
+    std::filesystem::remove(path);
+}
+
+void test_async_zero_length_and_offset_writes_are_successful() {
+    using namespace voris::io;
+
+    const auto path = temp_file("zero_offset_writes");
+    std::filesystem::remove(path);
+
+    auto opened = file::open(path, file_open_mode::write);
+    assert(opened.has_value());
+    auto current = std::move(*opened);
+
+    std::array<std::byte, 2> prefix{std::byte{'O'}, std::byte{'K'}};
+    auto initial_write = current.write_at(0, prefix);
+    assert(initial_write.has_value());
+    assert(*initial_write == prefix.size());
+
+    blocking_executor executor(1, 3);
+    shard owner;
+
+    std::array<std::byte, 0> empty{};
+    {
+        current_scheduler_scope scope(owner.scheduler());
+        auto zero_write = current.async_write_at(executor, 1, empty);
+        pump_until_ready(owner, zero_write);
+        auto result = std::move(zero_write).take_result();
+        assert(result.has_value());
+        assert(*result == 0);
+    }
+
+    {
+        current_scheduler_scope scope(owner.scheduler());
+        auto zero_read = current.async_read_at(executor, 1, 0);
+        pump_until_ready(owner, zero_read);
+        auto result = std::move(zero_read).take_result();
+        assert(result.has_value());
+        assert(result->empty());
+    }
+
+    std::array<std::byte, 1> suffix{std::byte{'!'}};
+    {
+        current_scheduler_scope scope(owner.scheduler());
+        auto sparse_write = current.async_write_at(executor, 5, suffix);
+        pump_until_ready(owner, sparse_write);
+        auto result = std::move(sparse_write).take_result();
+        assert(result.has_value());
+        assert(*result == suffix.size());
+    }
+
+    assert(current.sync_all().has_value());
+    auto size = current.size();
+    assert(size.has_value());
+    assert(*size == 6);
+
+    auto suffix_read = current.read_at(5, 1);
+    assert(suffix_read.has_value());
+    assert(suffix_read->size() == 1);
+    assert((*suffix_read)[0] == std::byte{'!'});
+
+    executor.shutdown();
+    assert(current.close().has_value());
     std::filesystem::remove(path);
 }
 
@@ -321,7 +513,11 @@ int main() {
     test_sync_file_operations();
     test_async_open_runs_on_executor_and_completes_on_owner_scheduler();
     test_async_submit_failure_reports_executor_error();
-    test_async_open_failure_is_returned_as_result();
+    test_async_file_operation_reports_resource_exhausted_when_queue_is_full();
+    test_executor_shutdown_drains_queued_file_work();
+    test_async_open_missing_read_reports_disk_backend_failure();
+    test_async_read_past_eof_returns_short_buffer();
+    test_async_zero_length_and_offset_writes_are_successful();
     test_async_write_owns_input_buffer_snapshot();
     test_async_close_then_async_read_write_report_closed();
     return 0;

@@ -70,7 +70,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M5-004** Implement `sync_data` and `sync_all` and document platform durability semantics.
 - [x] **VIO-M5-005** Define completion when a started blocking system call cannot be forcibly cancelled.
 - [x] **VIO-M5-006** Expose sendfile-compatible access without leaking raw ownership.
-- [ ] **VIO-M5-007** Test file-pool saturation, shutdown, short reads/writes, and disk errors.
+- [x] **VIO-M5-007** Test file-pool saturation, shutdown, short reads/writes, and disk errors.
 
 ## M6 — io_uring Backend
 
