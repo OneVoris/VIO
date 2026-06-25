@@ -1,6 +1,7 @@
 #include <voris/io/backends/iocp_backend.hpp>
 
 #include <algorithm>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
