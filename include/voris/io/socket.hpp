@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -34,5 +35,10 @@ struct buffer_chain_view {
 };
 
 [[nodiscard]] std::size_t total_size(std::span<const buffer_chain_view> buffers) noexcept;
+
+[[nodiscard]] io_result<std::size_t> read_some(std::size_t native_handle,
+                                               std::span<std::byte> buffer);
+[[nodiscard]] io_result<std::size_t> write_some(std::size_t native_handle,
+                                                std::span<const std::byte> buffer);
 
 } // namespace voris::io
