@@ -1,4 +1,5 @@
 #include <voris/io/socket.hpp>
+#include <voris/io/detail/socket_accept_errors.hpp>
 #include <voris/io/detail/socket_io_limits.hpp>
 
 #include <cstdint>
@@ -205,6 +206,9 @@ io_result<std::size_t> accept_one(std::size_t native_handle) {
         }
         if (provider_code == EAGAIN || provider_code == EWOULDBLOCK) {
             return std::unexpected(operation_in_progress_error());
+        }
+        if (detail::is_accept_retryable_pending_network_error(provider_code)) {
+            continue;
         }
         return std::unexpected(provider_failure(provider_code));
     }

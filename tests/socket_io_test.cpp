@@ -1,7 +1,9 @@
 #include <voris/io/socket.hpp>
+#include <voris/io/detail/socket_accept_errors.hpp>
 #include <voris/io/detail/socket_io_limits.hpp>
 
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <limits>
 
@@ -72,6 +74,37 @@ void test_socket_io_size_cap() {
         assert(cap_socket_io_size(cap + 1) == cap);
     }
     assert(cap_socket_io_size(std::numeric_limits<std::size_t>::max()) == cap);
+}
+
+void test_accept_pending_network_errors_are_retryable() {
+    using voris::io::detail::is_accept_retryable_pending_network_error;
+
+    assert(!is_accept_retryable_pending_network_error(0));
+
+#if defined(ENETDOWN)
+    assert(is_accept_retryable_pending_network_error(ENETDOWN));
+#endif
+#if defined(EPROTO)
+    assert(is_accept_retryable_pending_network_error(EPROTO));
+#endif
+#if defined(ENOPROTOOPT)
+    assert(is_accept_retryable_pending_network_error(ENOPROTOOPT));
+#endif
+#if defined(EHOSTDOWN)
+    assert(is_accept_retryable_pending_network_error(EHOSTDOWN));
+#endif
+#if defined(ENONET)
+    assert(is_accept_retryable_pending_network_error(ENONET));
+#endif
+#if defined(EHOSTUNREACH)
+    assert(is_accept_retryable_pending_network_error(EHOSTUNREACH));
+#endif
+#if defined(EOPNOTSUPP)
+    assert(is_accept_retryable_pending_network_error(EOPNOTSUPP));
+#endif
+#if defined(ENETUNREACH)
+    assert(is_accept_retryable_pending_network_error(ENETUNREACH));
+#endif
 }
 
 #if defined(__linux__)
@@ -550,6 +583,7 @@ int main() {
     test_socket_operation_queue();
     test_total_size();
     test_socket_io_size_cap();
+    test_accept_pending_network_errors_are_retryable();
 
 #if defined(__linux__)
     test_linux_accept_one_without_pending_connection_reports_in_progress();
