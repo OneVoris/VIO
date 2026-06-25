@@ -60,6 +60,10 @@ template<class Scheduler>
 
 } // namespace detail
 
+// VIO async-operation continuations require schedulers that enqueue work for a
+// later scheduler turn and return to the caller. scheduler_ref cannot enforce
+// this for arbitrary user adapters; schedulers that invoke continuations inline
+// do not satisfy the async-operation scheduler contract.
 class scheduler_ref {
 public:
     scheduler_ref() noexcept = default;

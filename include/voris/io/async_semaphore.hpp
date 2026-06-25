@@ -18,16 +18,34 @@
 namespace voris::io {
 
 class async_semaphore {
-    struct waiter_state {
-        explicit waiter_state(async_semaphore* owner) noexcept
-            : owner(owner) {}
+    struct waiter_state;
 
-        void complete(void_result value) {
+    struct semaphore_state {
+        semaphore_state(std::size_t initial_permits, std::size_t waiter_limit) noexcept
+            : permits(initial_permits),
+              max_waiters(waiter_limit) {}
+
+        std::size_t permits;
+        std::size_t max_waiters;
+        std::deque<std::shared_ptr<waiter_state>> waiters;
+        bool alive{true};
+    };
+
+    struct waiter_state {
+        explicit waiter_state(const std::shared_ptr<semaphore_state>& owner_state) noexcept
+            : owner(owner_state) {}
+
+        bool complete(void_result value) {
+            if (has_result) {
+                return false;
+            }
+
             result = std::move(value);
             has_result = true;
+            return true;
         }
 
-        async_semaphore* owner{nullptr};
+        std::weak_ptr<semaphore_state> owner;
         std::coroutine_handle<> continuation{};
         std::optional<scheduler_ref> scheduler{};
         void_result result{};
@@ -35,13 +53,14 @@ class async_semaphore {
         bool enqueued{false};
         bool detached{false};
         bool observing{false};
+        bool permit_reserved{false};
     };
 
 public:
     class acquire_operation {
     public:
-        explicit acquire_operation(async_semaphore& semaphore)
-            : state_(std::make_shared<waiter_state>(&semaphore)) {}
+        explicit acquire_operation(const std::shared_ptr<semaphore_state>& owner)
+            : state_(std::make_shared<waiter_state>(owner)) {}
 
         acquire_operation(const acquire_operation&) = delete;
         acquire_operation& operator=(const acquire_operation&) = delete;
@@ -62,28 +81,17 @@ public:
         }
 
         [[nodiscard]] bool await_ready() {
-            if (!state_ || state_->owner == nullptr) {
-                complete_invalid_state();
-                return true;
-            }
-            return state_->owner->try_complete_immediate(state_);
+            return async_semaphore::try_complete_immediate(state_);
         }
 
         [[nodiscard]] bool await_suspend(std::coroutine_handle<> continuation) {
-            if (!state_ || state_->owner == nullptr) {
-                complete_invalid_state();
-                return false;
-            }
-
             auto scheduler = current_scheduler();
             if (!scheduler.has_value()) {
-                state_->complete(std::unexpected(make_error(
-                    vio_error_code::invalid_state, "semaphore acquire without a current scheduler")));
-                state_->owner = nullptr;
+                complete_invalid_state("semaphore acquire without a current scheduler");
                 return false;
             }
 
-            return state_->owner->enqueue_waiter(state_, continuation, *scheduler);
+            return async_semaphore::enqueue_waiter(state_, continuation, *scheduler);
         }
 
         [[nodiscard]] void_result await_resume() {
@@ -95,7 +103,8 @@ public:
             state_->observing = true;
             state_->continuation = {};
             state_->scheduler.reset();
-            state_->owner = nullptr;
+            state_->owner.reset();
+            state_->permit_reserved = false;
 
             void_result result = state_->has_result
                                      ? std::move(state_->result)
@@ -107,10 +116,11 @@ public:
         }
 
     private:
-        void complete_invalid_state() {
-            if (state_ && !state_->has_result) {
-                state_->complete(std::unexpected(make_error(
-                    vio_error_code::invalid_state, "invalid semaphore acquire operation")));
+        void complete_invalid_state(const char* diagnostic) {
+            if (state_) {
+                (void)state_->complete(
+                    std::unexpected(make_error(vio_error_code::invalid_state, diagnostic)));
+                state_->owner.reset();
             }
         }
 
@@ -122,8 +132,10 @@ public:
             state_->detached = true;
             state_->continuation = {};
             state_->scheduler.reset();
-            if (state_->owner != nullptr) {
-                state_->owner->detach_waiter(state_);
+            if (auto owner = state_->owner.lock()) {
+                async_semaphore::detach_waiter(std::move(owner), state_);
+            } else {
+                state_->owner.reset();
             }
             state_.reset();
         }
@@ -131,26 +143,22 @@ public:
         std::shared_ptr<waiter_state> state_;
     };
 
+    // The single-argument constructor derives a strict waiter bound from the
+    // initial permit count. A zero initial count still allows one waiter.
     explicit async_semaphore(std::size_t permits)
         : async_semaphore(permits, default_max_waiters(permits)) {}
 
-    async_semaphore(std::size_t permits, std::size_t max_waiters) noexcept
-        : permits_(permits),
-          max_waiters_(max_waiters) {}
+    // max_waiters == 0 creates a non-queuing semaphore: acquire() can only
+    // complete immediately from an available permit, otherwise it reports
+    // resource_exhausted without adding a waiter.
+    async_semaphore(std::size_t permits, std::size_t max_waiters)
+        : state_(std::make_shared<semaphore_state>(permits, max_waiters)) {}
 
     async_semaphore(const async_semaphore&) = delete;
     async_semaphore& operator=(const async_semaphore&) = delete;
 
     ~async_semaphore() {
-        for (auto& waiter : waiters_) {
-            if (waiter) {
-                waiter->owner = nullptr;
-                waiter->enqueued = false;
-                waiter->detached = true;
-                waiter->continuation = {};
-                waiter->scheduler.reset();
-            }
-        }
+        close_state(std::move(state_));
     }
 
     [[nodiscard]] static constexpr std::size_t default_max_waiters(
@@ -159,116 +167,171 @@ public:
     }
 
     [[nodiscard]] void_result try_acquire() {
-        if (permits_ == 0) {
+        if (!state_ || !state_->alive) {
+            return std::unexpected(make_error(vio_error_code::invalid_state,
+                                              "semaphore is not alive"));
+        }
+        if (state_->permits == 0) {
             return std::unexpected(make_error(vio_error_code::resource_exhausted,
                                               "no semaphore permits available"));
         }
 
-        --permits_;
+        --state_->permits;
         return {};
     }
 
     [[nodiscard]] acquire_operation acquire() {
-        return acquire_operation(*this);
+        return acquire_operation(state_);
     }
 
     void release(std::size_t permits = 1) noexcept {
-        if (permits == 0) {
-            return;
-        }
-
-        std::size_t remaining = permits;
-        while (remaining != 0 && !waiters_.empty()) {
-            auto waiter = std::move(waiters_.front());
-            waiters_.pop_front();
-            if (!prepare_waiter_for_resume(waiter)) {
-                continue;
-            }
-
-            --remaining;
-            auto scheduler = *waiter->scheduler;
-            waiter->complete({});
-            waiter->owner = nullptr;
-            waiter->enqueued = false;
-
-            auto scheduled = trampoline::schedule_system(
-                scheduler, [state = std::move(waiter), scheduler] mutable {
-                    resume_waiter(std::move(state), scheduler);
-                });
-            if (!scheduled.has_value()) {
-                std::terminate();
-            }
-        }
-
-        add_permits_saturating(remaining);
+        release_to_state(state_, permits);
     }
 
     [[nodiscard]] std::size_t permits() const noexcept {
-        return permits_;
+        return state_ ? state_->permits : 0;
     }
 
     [[nodiscard]] std::size_t waiters() const noexcept {
-        return waiters_.size();
+        return state_ ? state_->waiters.size() : 0;
     }
 
     [[nodiscard]] std::size_t max_waiters() const noexcept {
-        return max_waiters_;
+        return state_ ? state_->max_waiters : 0;
     }
 
 private:
-    [[nodiscard]] bool try_complete_immediate(const std::shared_ptr<waiter_state>& state) {
-        if (!state || state->detached || state->has_result) {
+    [[nodiscard]] static bool try_complete_immediate(
+        const std::shared_ptr<waiter_state>& waiter) {
+        if (!waiter || waiter->detached || waiter->has_result) {
             return true;
         }
 
-        if (permits_ != 0) {
-            --permits_;
-            state->complete({});
-            state->owner = nullptr;
+        auto owner = waiter->owner.lock();
+        if (!owner || !owner->alive) {
+            (void)waiter->complete(std::unexpected(make_error(
+                vio_error_code::invalid_state, "semaphore acquire owner is not alive")));
+            waiter->owner.reset();
             return true;
         }
 
-        if (waiters_.size() >= max_waiters_) {
-            state->complete(std::unexpected(make_error(vio_error_code::resource_exhausted,
-                                                       "semaphore wait queue is full")));
-            state->owner = nullptr;
+        if (owner->permits != 0) {
+            --owner->permits;
+            (void)waiter->complete({});
+            waiter->owner.reset();
+            return true;
+        }
+
+        if (owner->waiters.size() >= owner->max_waiters) {
+            (void)waiter->complete(std::unexpected(make_error(
+                vio_error_code::resource_exhausted, "semaphore wait queue is full")));
+            waiter->owner.reset();
             return true;
         }
 
         return false;
     }
 
-    [[nodiscard]] bool enqueue_waiter(const std::shared_ptr<waiter_state>& state,
-                                      std::coroutine_handle<> continuation,
-                                      scheduler_ref scheduler) {
-        if (try_complete_immediate(state)) {
+    [[nodiscard]] static bool enqueue_waiter(const std::shared_ptr<waiter_state>& waiter,
+                                             std::coroutine_handle<> continuation,
+                                             scheduler_ref scheduler) {
+        if (try_complete_immediate(waiter)) {
             return false;
         }
 
-        state->continuation = continuation;
-        state->scheduler = scheduler;
-        state->enqueued = true;
-        waiters_.push_back(state);
+        auto owner = waiter->owner.lock();
+        if (!owner || !owner->alive) {
+            (void)waiter->complete(std::unexpected(make_error(
+                vio_error_code::invalid_state, "semaphore acquire owner is not alive")));
+            waiter->owner.reset();
+            return false;
+        }
+
+        waiter->continuation = continuation;
+        waiter->scheduler = scheduler;
+        waiter->enqueued = true;
+        owner->waiters.push_back(waiter);
         return true;
     }
 
-    void detach_waiter(const std::shared_ptr<waiter_state>& state) noexcept {
-        if (!state) {
+    static void detach_waiter(std::shared_ptr<semaphore_state> owner,
+                              const std::shared_ptr<waiter_state>& waiter) noexcept {
+        if (!waiter) {
             return;
         }
 
-        if (state->enqueued) {
-            auto found = std::find_if(waiters_.begin(), waiters_.end(),
-                                      [&state](const std::shared_ptr<waiter_state>& queued) {
-                                          return queued.get() == state.get();
+        if (waiter->enqueued) {
+            auto found = std::find_if(owner->waiters.begin(), owner->waiters.end(),
+                                      [&waiter](const std::shared_ptr<waiter_state>& queued) {
+                                          return queued.get() == waiter.get();
                                       });
-            if (found != waiters_.end()) {
-                waiters_.erase(found);
+            if (found != owner->waiters.end()) {
+                owner->waiters.erase(found);
             }
-            state->enqueued = false;
+            waiter->enqueued = false;
+            waiter->owner.reset();
+            return;
         }
 
-        state->owner = nullptr;
+        if (waiter->permit_reserved) {
+            waiter->permit_reserved = false;
+            waiter->owner.reset();
+            if (owner->alive) {
+                release_to_state(std::move(owner), 1);
+            }
+            return;
+        }
+
+        waiter->owner.reset();
+    }
+
+    static void release_to_state(const std::shared_ptr<semaphore_state>& owner,
+                                 std::size_t permits) noexcept {
+        if (!owner || !owner->alive || permits == 0) {
+            return;
+        }
+
+        std::size_t remaining = permits;
+        while (remaining != 0 && !owner->waiters.empty()) {
+            auto waiter = std::move(owner->waiters.front());
+            owner->waiters.pop_front();
+            if (!prepare_waiter_for_resume(waiter)) {
+                continue;
+            }
+
+            --remaining;
+            auto scheduler = *waiter->scheduler;
+            waiter->permit_reserved = true;
+            waiter->enqueued = false;
+            (void)waiter->complete({});
+
+            schedule_waiter(std::move(waiter), scheduler);
+        }
+
+        add_permits_saturating(*owner, remaining);
+    }
+
+    static void close_state(std::shared_ptr<semaphore_state> owner) noexcept {
+        if (!owner) {
+            return;
+        }
+
+        owner->alive = false;
+        while (!owner->waiters.empty()) {
+            auto waiter = std::move(owner->waiters.front());
+            owner->waiters.pop_front();
+            if (!prepare_waiter_for_resume(waiter)) {
+                continue;
+            }
+
+            auto scheduler = *waiter->scheduler;
+            waiter->owner.reset();
+            waiter->enqueued = false;
+            (void)waiter->complete(std::unexpected(make_error(
+                vio_error_code::invalid_state, "semaphore destroyed with pending acquire")));
+
+            schedule_waiter(std::move(waiter), scheduler);
+        }
     }
 
     [[nodiscard]] static bool prepare_waiter_for_resume(
@@ -279,37 +342,46 @@ private:
 
         waiter->enqueued = false;
         if (waiter->detached || !waiter->continuation || !waiter->scheduler.has_value()) {
-            waiter->owner = nullptr;
+            waiter->owner.reset();
             return false;
         }
 
         return true;
     }
 
-    static void resume_waiter(std::shared_ptr<waiter_state> state, scheduler_ref scheduler) {
-        if (!state || state->detached || state->observing || !state->continuation) {
+    static void schedule_waiter(std::shared_ptr<waiter_state> waiter,
+                                scheduler_ref scheduler) noexcept {
+        auto scheduled = trampoline::schedule_system(
+            scheduler, [state = std::move(waiter), scheduler] mutable {
+                resume_waiter(std::move(state), scheduler);
+            });
+        if (!scheduled.has_value()) {
+            std::terminate();
+        }
+    }
+
+    static void resume_waiter(std::shared_ptr<waiter_state> waiter, scheduler_ref scheduler) {
+        if (!waiter || waiter->detached || waiter->observing || !waiter->continuation) {
             return;
         }
 
-        auto continuation = std::exchange(state->continuation, {});
-        state->scheduler.reset();
+        auto continuation = std::exchange(waiter->continuation, {});
+        waiter->scheduler.reset();
         current_scheduler_scope scope(scheduler);
         continuation.resume();
     }
 
-    void add_permits_saturating(std::size_t permits) noexcept {
+    static void add_permits_saturating(semaphore_state& owner, std::size_t permits) noexcept {
         const auto max_permits = std::numeric_limits<std::size_t>::max();
-        if (permits > max_permits - permits_) {
-            permits_ = max_permits;
+        if (permits > max_permits - owner.permits) {
+            owner.permits = max_permits;
             return;
         }
 
-        permits_ += permits;
+        owner.permits += permits;
     }
 
-    std::size_t permits_;
-    std::size_t max_waiters_;
-    std::deque<std::shared_ptr<waiter_state>> waiters_;
+    std::shared_ptr<semaphore_state> state_;
 };
 
 } // namespace voris::io
