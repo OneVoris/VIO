@@ -162,6 +162,269 @@ voris::io::backend_handle_token require_token(
     return *result;
 }
 
+constexpr int test_io_uring_canceled_result = -125;
+
+voris::io::backends::io_uring_backend_options test_kernel_io_uring_options()
+    noexcept {
+    return voris::io::backends::io_uring_backend_options{
+        .submission_queue_capacity = 16,
+        .submit_batch_limit = 8,
+        .completion_batch_limit = 8,
+        .enable_kernel_submission = true,
+    };
+}
+
+class deterministic_io_uring_fixture {
+public:
+    [[nodiscard]] std::size_t make_native_handle() noexcept {
+        return next_native_handle_++;
+    }
+
+    [[nodiscard]] std::size_t invalid_native_handle() const noexcept {
+        return 0;
+    }
+
+    [[nodiscard]] std::size_t recreate_native_handle_with_same_number(
+        std::size_t native_handle) noexcept {
+        return native_handle;
+    }
+
+    void make_pending_completions_visible() {
+        auto polled = backend.poll();
+        assert(polled.has_value());
+    }
+
+    voris::io::backends::io_uring_backend backend{
+        deterministic_io_uring_capabilities(),
+        deterministic_io_uring_options(),
+    };
+
+private:
+    std::size_t next_native_handle_{1};
+};
+
+class io_uring_test_kernel_fixture {
+public:
+    io_uring_test_kernel_fixture() {
+        voris::io::backends::detail::attach_io_uring_test_kernel(backend, kernel);
+    }
+
+    [[nodiscard]] voris::io::backend_handle_token register_handle(
+        std::size_t native_handle = 1) {
+        return require_token(backend.register_handle(native_handle));
+    }
+
+    void flush_submissions(std::size_t expected_submission_count) {
+        auto polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 0);
+        assert(kernel.submissions.size() == expected_submission_count);
+    }
+
+    void push_operation_completion(std::size_t operation_id, int result) {
+        kernel.completions.push_back(voris::io::backends::detail::io_uring_test_completion{
+            voris::io::backends::detail::io_uring_test_completion_kind::operation,
+            operation_id,
+            result,
+        });
+    }
+
+    void push_cancel_ack(std::size_t operation_id) {
+        kernel.completions.push_back(voris::io::backends::detail::io_uring_test_completion{
+            voris::io::backends::detail::io_uring_test_completion_kind::cancel_ack,
+            operation_id,
+            0,
+        });
+    }
+
+    voris::io::backends::detail::io_uring_test_kernel kernel{};
+    voris::io::backends::io_uring_backend backend{
+        deterministic_io_uring_capabilities(),
+        test_kernel_io_uring_options(),
+    };
+};
+
+std::vector<normalized_completion> run_queued_io_uring_cancel_completion() {
+    using namespace voris::io;
+
+    deterministic_io_uring_fixture fixture;
+    const auto token = require_token(fixture.backend.register_handle(1));
+    std::array<std::byte, 1> output{};
+
+    assert(fixture.backend.submit(read_operation(801, token, output)).has_value());
+    assert(fixture.backend.cancel(801, cancellation_reason::manual).has_value());
+
+    auto completions = drain_all(fixture.backend);
+    assert_no_extra_completion(fixture.backend);
+    assert(fixture.backend.close_handle(token).has_value());
+    return completions;
+}
+
+std::vector<normalized_completion> run_submitted_io_uring_cancel_completion() {
+    using namespace voris::io;
+
+    io_uring_test_kernel_fixture fixture;
+    const auto token = fixture.register_handle();
+    std::array<std::byte, 1> output{};
+
+    assert(fixture.backend.submit(read_operation(801, token, output)).has_value());
+    fixture.flush_submissions(1);
+    assert(fixture.backend.cancel(801, cancellation_reason::manual).has_value());
+    assert(fixture.kernel.submitted_cancel_operation_ids.size() == 1);
+    assert(fixture.kernel.submitted_cancel_operation_ids[0] == 801);
+
+    fixture.push_cancel_ack(801);
+    auto polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_operation_completion(801, test_io_uring_canceled_result);
+    polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    auto completions = drain_all(fixture.backend);
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_cancel_ack(801);
+    polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert_no_extra_completion(fixture.backend);
+    return completions;
+}
+
+void test_io_uring_cancelled_terminal_completion_is_exactly_once() {
+    using namespace voris::io;
+
+    const auto expected = std::vector<normalized_completion>{
+        normalized_completion{801, false, vio_error_code::cancelled},
+    };
+    const auto queued = run_queued_io_uring_cancel_completion();
+    const auto submitted = run_submitted_io_uring_cancel_completion();
+
+    assert(queued == expected);
+    assert(submitted == expected);
+    assert(queued == submitted);
+}
+
+void test_io_uring_test_kernel_submitted_close_drains_closed_once() {
+    using namespace voris::io;
+
+    io_uring_test_kernel_fixture fixture;
+    const auto token = fixture.register_handle();
+    std::array<std::byte, 1> output{};
+
+    assert(fixture.backend.submit(read_operation(811, token, output)).has_value());
+    fixture.flush_submissions(1);
+    assert(fixture.backend.close_handle(token).has_value());
+    assert(fixture.kernel.submitted_cancel_operation_ids.size() == 1);
+    assert(fixture.kernel.submitted_cancel_operation_ids[0] == 811);
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_cancel_ack(811);
+    auto polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_operation_completion(811, 1);
+    polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    const auto completions = drain_all(fixture.backend);
+    assert(completions == (std::vector<normalized_completion>{
+                              normalized_completion{811, false, vio_error_code::closed},
+                          }));
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_cancel_ack(811);
+    polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert_no_extra_completion(fixture.backend);
+}
+
+void test_io_uring_test_kernel_submitted_shutdown_drains_closed_once() {
+    using namespace voris::io;
+
+    io_uring_test_kernel_fixture fixture;
+    const auto token = fixture.register_handle();
+    std::array<std::byte, 1> output{};
+
+    assert(fixture.backend.submit(read_operation(821, token, output)).has_value());
+    fixture.flush_submissions(1);
+    assert(fixture.backend.shutdown().has_value());
+    assert(fixture.kernel.submitted_cancel_operation_ids.size() == 1);
+    assert(fixture.kernel.submitted_cancel_operation_ids[0] == 821);
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_cancel_ack(821);
+    auto polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_operation_completion(821, test_io_uring_canceled_result);
+    polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    const auto completions = drain_all(fixture.backend);
+    assert(completions == (std::vector<normalized_completion>{
+                              normalized_completion{821, false, vio_error_code::closed},
+                          }));
+    assert_no_extra_completion(fixture.backend);
+
+    polled = fixture.backend.poll();
+    assert_error(polled, vio_error_code::closed);
+}
+
+void test_io_uring_test_kernel_stale_cqe_after_handle_reuse_is_isolated() {
+    using namespace voris::io;
+
+    io_uring_test_kernel_fixture fixture;
+    const auto stale = fixture.register_handle(1);
+    std::array<std::byte, 1> old_output{};
+
+    assert(fixture.backend.submit(read_operation(831, stale, old_output)).has_value());
+    fixture.flush_submissions(1);
+    assert(fixture.backend.close_handle(stale).has_value());
+
+    const auto current = fixture.register_handle(1);
+    assert(current.native_handle == stale.native_handle);
+    assert(current.generation > stale.generation);
+
+    std::array<std::byte, 1> current_output{};
+    assert(fixture.backend.submit(read_operation(832, current, current_output)).has_value());
+
+    fixture.push_operation_completion(831, 1);
+    auto polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    auto completions = drain_all(fixture.backend);
+    assert(completions == (std::vector<normalized_completion>{
+                              normalized_completion{831, false, vio_error_code::closed},
+                          }));
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_cancel_ack(831);
+    polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+    assert_no_extra_completion(fixture.backend);
+
+    fixture.push_operation_completion(832, 1);
+    polled = fixture.backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    completions = drain_all(fixture.backend);
+    assert(completions == (std::vector<normalized_completion>{
+                              normalized_completion{832, true, vio_error_code::none},
+                          }));
+    assert_no_extra_completion(fixture.backend);
+    assert(fixture.backend.close_handle(current).has_value());
+}
+
 #if defined(__linux__)
 class unique_fd {
 public:
@@ -267,35 +530,6 @@ private:
     }
 
     std::vector<unique_fd> handles_{};
-};
-
-class deterministic_io_uring_fixture {
-public:
-    [[nodiscard]] std::size_t make_native_handle() noexcept {
-        return next_native_handle_++;
-    }
-
-    [[nodiscard]] std::size_t invalid_native_handle() const noexcept {
-        return 0;
-    }
-
-    [[nodiscard]] std::size_t recreate_native_handle_with_same_number(
-        std::size_t native_handle) noexcept {
-        return native_handle;
-    }
-
-    void make_pending_completions_visible() {
-        auto polled = backend.poll();
-        assert(polled.has_value());
-    }
-
-    voris::io::backends::io_uring_backend backend{
-        deterministic_io_uring_capabilities(),
-        deterministic_io_uring_options(),
-    };
-
-private:
-    std::size_t next_native_handle_{1};
 };
 
 template <class Fixture>
@@ -625,6 +859,10 @@ normalized_completion run_real_io_uring_read_success(
     std::array<std::byte, 1> output{};
     assert(backend.submit(read_operation(operation_id, *token, output)).has_value());
     const auto completion = wait_for_completion(backend);
+    assert(completion.operation_id == operation_id);
+    assert(completion.result.has_value());
+    assert(completion.bytes_transferred == payload.size());
+    assert(output == payload);
     assert(backend.shutdown().has_value());
     return normalize(completion);
 }
@@ -640,6 +878,14 @@ normalized_completion run_real_io_uring_write_success(
     const std::array<std::byte, 1> payload{std::byte{'w'}};
     assert(backend.submit(write_operation(operation_id, *token, payload)).has_value());
     const auto completion = wait_for_completion(backend);
+    assert(completion.operation_id == operation_id);
+    assert(completion.result.has_value());
+    assert(completion.bytes_transferred == payload.size());
+
+    std::array<std::byte, 1> observed{};
+    assert(::recv(sockets[1].get(), observed.data(), observed.size(), 0) == 1);
+    assert(observed == payload);
+
     assert(backend.shutdown().has_value());
     return normalize(completion);
 }
@@ -695,6 +941,11 @@ void test_non_linux_backends_report_unavailable_or_unsupported() {
 } // namespace
 
 int main() {
+    test_io_uring_cancelled_terminal_completion_is_exactly_once();
+    test_io_uring_test_kernel_submitted_close_drains_closed_once();
+    test_io_uring_test_kernel_submitted_shutdown_drains_closed_once();
+    test_io_uring_test_kernel_stale_cqe_after_handle_reuse_is_isolated();
+
 #if defined(__linux__)
     test_invalid_inputs_match_between_epoll_and_io_uring();
     test_duplicate_operation_id_while_pending_matches();
