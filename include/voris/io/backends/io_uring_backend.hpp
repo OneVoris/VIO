@@ -41,6 +41,27 @@ enum class io_uring_backend_state {
 
 [[nodiscard]] io_uring_capabilities detect_io_uring_capabilities() noexcept;
 
+namespace detail {
+
+enum class pending_io_uring_submission_kind {
+    operation,
+    cancel,
+};
+
+struct pending_io_uring_submission {
+    pending_io_uring_submission_kind kind{};
+    std::size_t operation_id{};
+};
+
+void discard_submitted_io_uring_submissions(
+    std::deque<pending_io_uring_submission>& pending,
+    unsigned submitted_count) noexcept;
+[[nodiscard]] std::vector<pending_io_uring_submission>
+take_unsubmitted_io_uring_submissions(
+    std::deque<pending_io_uring_submission>& pending);
+
+} // namespace detail
+
 class io_uring_backend final : public backend {
 public:
     explicit io_uring_backend(io_uring_capabilities capabilities =
@@ -90,6 +111,8 @@ private:
     [[nodiscard]] void_result request_kernel_cancellation_for(
         std::size_t operation_id,
         kernel_operation& operation);
+    [[nodiscard]] io_result<std::size_t> progress_kernel_submissions();
+    std::size_t complete_unsubmitted_kernel_submissions(const vio_error& error);
     [[nodiscard]] io_result<std::size_t> flush_submission_batch();
     [[nodiscard]] io_result<std::size_t> observe_completion_batch();
     [[nodiscard]] io_result<std::size_t> observe_kernel_completions();
@@ -104,6 +127,7 @@ private:
     std::unique_ptr<kernel_ring> kernel_ring_{};
     std::deque<queued_submission> submission_queue_{};
     std::deque<backend_completion> completion_queue_{};
+    std::deque<detail::pending_io_uring_submission> pending_kernel_submissions_{};
     std::unordered_map<std::size_t, kernel_operation> kernel_operations_{};
     std::unordered_set<std::size_t> kernel_cancel_operation_ids_{};
     std::unordered_set<std::size_t> active_operation_ids_{};

@@ -268,6 +268,26 @@ io_uring_capabilities capabilities_from_io_uring_probe_opcodes(
     return capabilities;
 }
 
+void discard_submitted_io_uring_submissions(
+    std::deque<pending_io_uring_submission>& pending,
+    unsigned submitted_count) noexcept {
+    while (submitted_count != 0U && !pending.empty()) {
+        pending.pop_front();
+        --submitted_count;
+    }
+}
+
+std::vector<pending_io_uring_submission> take_unsubmitted_io_uring_submissions(
+    std::deque<pending_io_uring_submission>& pending) {
+    std::vector<pending_io_uring_submission> unsubmitted{};
+    unsubmitted.reserve(pending.size());
+    while (!pending.empty()) {
+        unsubmitted.push_back(pending.front());
+        pending.pop_front();
+    }
+    return unsubmitted;
+}
+
 } // namespace detail
 
 io_uring_capabilities detect_io_uring_capabilities() noexcept {
@@ -349,6 +369,8 @@ struct io_uring_backend::kernel_ring {
 
     [[nodiscard]] io_result<sqe_reservation> reserve_sqe() {
         const auto head = std::atomic_ref<unsigned>(*sq_head).load();
+        // No SQPOLL is enabled, so a failed enter leaves the unsubmitted tail
+        // under userspace control and it can be made invisible to later enters.
         const auto tail = std::atomic_ref<unsigned>(*sq_tail).load();
         if (tail - head >= *sq_ring_entries) {
             return std::unexpected(make_error(vio_error_code::resource_exhausted,
@@ -368,7 +390,7 @@ struct io_uring_backend::kernel_ring {
         ++pending_submissions;
     }
 
-    [[nodiscard]] void_result submit_pending() {
+    [[nodiscard]] io_result<unsigned> submit_pending_once() {
         while (pending_submissions != 0U) {
             const long submitted =
                 ::syscall(SYS_io_uring_enter, fd, pending_submissions, 0U, 0U,
@@ -379,7 +401,7 @@ struct io_uring_backend::kernel_ring {
                     submitted_count >= pending_submissions
                         ? 0U
                         : pending_submissions - submitted_count;
-                continue;
+                return submitted_count;
             }
             if (submitted < 0) {
                 if (errno == EINTR) {
@@ -390,7 +412,16 @@ struct io_uring_backend::kernel_ring {
             return std::unexpected(make_error(vio_error_code::backend_failure,
                                               "io_uring made no submission progress"));
         }
-        return {};
+        return 0U;
+    }
+
+    void drop_pending_submissions() noexcept {
+        if (pending_submissions == 0U) {
+            return;
+        }
+        const auto tail = std::atomic_ref<unsigned>(*sq_tail).load();
+        std::atomic_ref<unsigned>(*sq_tail).store(tail - pending_submissions);
+        pending_submissions = 0U;
     }
 
     [[nodiscard]] unsigned pending_submission_count() const noexcept {
@@ -645,13 +676,19 @@ io_result<std::size_t> io_uring_backend::poll() {
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
+    const auto completion_count_before = completion_queue_.size();
     auto flushed = flush_submission_batch();
     if (!flushed.has_value()) {
         return std::unexpected(flushed.error());
     }
     // The count is newly observed completions made drainable by this poll.
     // Submission flushes only publish backend references and are not counted.
-    return observe_completion_batch();
+    auto observed = observe_completion_batch();
+    if (!observed.has_value()) {
+        return std::unexpected(observed.error());
+    }
+    (void)*observed;
+    return completion_queue_.size() - completion_count_before;
 }
 
 io_result<std::size_t> io_uring_backend::drain_completions(
@@ -886,14 +923,14 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
 
     kernel_operations_.emplace(operation.id,
                                io_uring_backend::kernel_operation{.operation = operation});
+    pending_kernel_submissions_.push_back(
+        detail::pending_io_uring_submission{
+            .kind = detail::pending_io_uring_submission_kind::operation,
+            .operation_id = operation.id,
+        });
     kernel_ring_->publish_sqe(*reservation);
-    if (auto submitted = kernel_ring_->submit_pending(); !submitted.has_value()) {
-        if (kernel_ring_->pending_submission_count() == 0U) {
-            return std::unexpected(submitted.error());
-        }
-        // Published SQEs with uncertain submission state stay tracked and are
-        // retried from later poll/submit paths.
-        return {};
+    if (auto submitted = progress_kernel_submissions(); !submitted.has_value()) {
+        return std::unexpected(submitted.error());
     }
     return {};
 #else
@@ -963,14 +1000,14 @@ void_result io_uring_backend::request_kernel_cancellation_for(
 
     operation.cancel_submitted = true;
     kernel_cancel_operation_ids_.insert(operation_id);
+    pending_kernel_submissions_.push_back(
+        detail::pending_io_uring_submission{
+            .kind = detail::pending_io_uring_submission_kind::cancel,
+            .operation_id = operation_id,
+        });
     kernel_ring_->publish_sqe(*reservation);
-    if (auto submitted = kernel_ring_->submit_pending(); !submitted.has_value()) {
-        if (kernel_ring_->pending_submission_count() == 0U) {
-            return std::unexpected(submitted.error());
-        }
-        // A published cancellation SQE with uncertain submission state stays
-        // tracked and is retried from later poll/submit paths.
-        return {};
+    if (auto submitted = progress_kernel_submissions(); !submitted.has_value()) {
+        return std::unexpected(submitted.error());
     }
 
     return {};
@@ -994,6 +1031,73 @@ io_result<std::size_t> io_uring_backend::flush_submission_batch() {
         submission_queue_.pop_front();
     }
     return flushed;
+}
+
+io_result<std::size_t> io_uring_backend::progress_kernel_submissions() {
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
+    if (!kernel_ring_) {
+        return 0U;
+    }
+
+    std::size_t visible = 0;
+    while (kernel_ring_->pending_submission_count() != 0U) {
+        auto submitted = kernel_ring_->submit_pending_once();
+        if (submitted.has_value()) {
+            if (*submitted == 0U) {
+                break;
+            }
+            detail::discard_submitted_io_uring_submissions(
+                pending_kernel_submissions_, *submitted);
+            continue;
+        }
+
+        const auto failure = submitted.error();
+        kernel_ring_->drop_pending_submissions();
+        visible += complete_unsubmitted_kernel_submissions(failure);
+        break;
+    }
+
+    return visible;
+#else
+    return 0U;
+#endif
+}
+
+std::size_t io_uring_backend::complete_unsubmitted_kernel_submissions(
+    const vio_error& error) {
+    const auto unsubmitted =
+        detail::take_unsubmitted_io_uring_submissions(pending_kernel_submissions_);
+    std::size_t visible = 0;
+
+    for (const auto& submission : unsubmitted) {
+        if (submission.kind == detail::pending_io_uring_submission_kind::cancel) {
+            kernel_cancel_operation_ids_.erase(submission.operation_id);
+            if (auto found = kernel_operations_.find(submission.operation_id);
+                found != kernel_operations_.end()) {
+                found->second.cancel_submitted = false;
+            }
+            continue;
+        }
+
+        auto found = kernel_operations_.find(submission.operation_id);
+        if (found == kernel_operations_.end()) {
+            continue;
+        }
+
+        backend_completion completion{};
+        completion.operation_id = submission.operation_id;
+        if (closed_ || found->second.close_requested ||
+            !fallback_.is_current_handle(found->second.operation.handle)) {
+            completion.result = closed_completion();
+        } else {
+            completion.result = std::unexpected(error);
+        }
+        kernel_operations_.erase(found);
+        completion_queue_.push_back(std::move(completion));
+        ++visible;
+    }
+
+    return visible;
 }
 
 io_result<std::size_t> io_uring_backend::observe_completion_batch() {
@@ -1030,14 +1134,14 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
         return 0U;
     }
 
-    if (auto submitted = kernel_ring_->submit_pending();
-        !submitted.has_value() && kernel_ring_->pending_submission_count() == 0U) {
-        return std::unexpected(submitted.error());
+    auto progressed = progress_kernel_submissions();
+    if (!progressed.has_value()) {
+        return std::unexpected(progressed.error());
     }
 
     std::vector<io_uring_cqe> batch(options_.completion_batch_limit);
     const std::size_t count = kernel_ring_->drain_cqes(batch);
-    std::size_t visible = 0;
+    std::size_t visible = *progressed;
     for (std::size_t index = 0; index < count; ++index) {
         const auto& cqe = batch[index];
         const auto decoded = decode_kernel_user_data(cqe.user_data);

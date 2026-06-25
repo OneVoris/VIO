@@ -3,10 +3,12 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <deque>
 #include <limits>
 #include <span>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(__linux__)
 #include <arpa/inet.h>
@@ -1166,6 +1168,36 @@ void test_kernel_submit_rejects_invalid_payloads_immediately() {
 
 }
 
+void test_pending_submission_failure_resolves_only_unsubmitted_tail() {
+    using voris::io::backends::detail::pending_io_uring_submission;
+    using voris::io::backends::detail::pending_io_uring_submission_kind;
+
+    std::deque<pending_io_uring_submission> pending{
+        {pending_io_uring_submission_kind::operation, 201},
+        {pending_io_uring_submission_kind::cancel, 201},
+        {pending_io_uring_submission_kind::operation, 202},
+        {pending_io_uring_submission_kind::cancel, 202},
+    };
+
+    voris::io::backends::detail::discard_submitted_io_uring_submissions(
+        pending, 2);
+    assert(pending.size() == 2);
+    assert(pending[0].kind == pending_io_uring_submission_kind::operation);
+    assert(pending[0].operation_id == 202);
+    assert(pending[1].kind == pending_io_uring_submission_kind::cancel);
+    assert(pending[1].operation_id == 202);
+
+    const auto failed =
+        voris::io::backends::detail::take_unsubmitted_io_uring_submissions(
+            pending);
+    assert(pending.empty());
+    assert(failed.size() == 2);
+    assert(failed[0].kind == pending_io_uring_submission_kind::operation);
+    assert(failed[0].operation_id == 202);
+    assert(failed[1].kind == pending_io_uring_submission_kind::cancel);
+    assert(failed[1].operation_id == 202);
+}
+
 void test_poll_flushes_submissions_in_batches() {
     voris::io::backends::io_uring_backend backend(
         core_capabilities(), deterministic_options(8, 2, 8));
@@ -1481,6 +1513,7 @@ int main() {
     test_kernel_mode_queued_cancellation_is_rejected_before_recording();
     test_kernel_submission_requires_cancel_capability_for_close_liveness();
     test_kernel_submit_rejects_invalid_payloads_immediately();
+    test_pending_submission_failure_resolves_only_unsubmitted_tail();
     test_poll_flushes_submissions_in_batches();
     test_socket_operations_flow_through_submission_batches_and_close_fifo();
     test_poll_observes_completions_in_batches_and_drain_preserves_order();
