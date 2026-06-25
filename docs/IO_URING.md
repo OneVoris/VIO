@@ -8,6 +8,10 @@ criteria.
 Registered buffers and files are optional optimizations. They do not change
 default VIO ownership semantics; public file and buffer ownership remains with
 the VIO object or caller-provided view that created the operation.
+`supports_registered_files` currently means the kernel probe reports the
+files-update opcode as a candidate for registered-file support. It does not mean
+VIO has completed the registered-file lifecycle contract; M6-006 owns that
+validation and default-use decision.
 
 Capability detection is conservative. VIO first attempts a minimal
 `io_uring_setup` syscall and reports the backend unavailable when the syscall is

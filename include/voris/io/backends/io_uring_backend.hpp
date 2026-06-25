@@ -17,6 +17,8 @@ struct io_uring_capabilities {
     bool supports_fsync{};
     bool supports_cancel{};
     bool supports_registered_buffers{};
+    // Candidate support based on the files-update opcode. M6-006 must still
+    // validate registered-file lifecycle before this becomes a default path.
     bool supports_registered_files{};
 };
 

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 
 #if defined(__linux__) && __has_include(<linux/io_uring.h>)
 #include <linux/io_uring.h>
@@ -11,12 +12,15 @@
 
 namespace voris::io::backends {
 
+namespace detail {
+
+[[nodiscard]] io_uring_capabilities capabilities_from_io_uring_probe_opcodes(
+    std::span<const unsigned> supported_opcodes) noexcept;
+
+} // namespace detail
+
 namespace {
 
-#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_register)
-
-constexpr unsigned register_probe = 8U;
-constexpr unsigned op_supported = 1U << 0U;
 constexpr unsigned op_readv = 1U;
 constexpr unsigned op_writev = 2U;
 constexpr unsigned op_fsync = 3U;
@@ -28,6 +32,11 @@ constexpr unsigned op_connect = 16U;
 constexpr unsigned op_files_update = 20U;
 constexpr unsigned op_read = 22U;
 constexpr unsigned op_write = 23U;
+
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_register)
+
+constexpr unsigned register_probe = 8U;
+constexpr unsigned op_supported = 1U << 0U;
 constexpr std::uint32_t minimal_ring_entries = 2U;
 constexpr std::size_t probe_op_capacity = 64U;
 
@@ -67,39 +76,21 @@ private:
     int fd_{-1};
 };
 
-[[nodiscard]] bool probe_supports(const kernel_probe_buffer& probe,
-                                  unsigned opcode) noexcept {
-    if (opcode > probe.last_op) {
-        return false;
-    }
+void apply_probe(io_uring_capabilities& capabilities,
+                 const kernel_probe_buffer& probe) noexcept {
+    std::array<unsigned, probe_op_capacity> supported_opcodes{};
+    std::size_t supported_count{0};
 
     const auto count = probe.ops_len < probe.ops.size() ? probe.ops_len : probe.ops.size();
     for (std::size_t index = 0; index < count; ++index) {
         const auto& op = probe.ops[index];
-        if (op.op == opcode) {
-            return (op.flags & op_supported) != 0U;
+        if (op.op <= probe.last_op && (op.flags & op_supported) != 0U) {
+            supported_opcodes[supported_count++] = op.op;
         }
     }
 
-    return false;
-}
-
-void apply_probe(io_uring_capabilities& capabilities,
-                 const kernel_probe_buffer& probe) noexcept {
-    capabilities.supports_read =
-        probe_supports(probe, op_read) || probe_supports(probe, op_readv);
-    capabilities.supports_write =
-        probe_supports(probe, op_write) || probe_supports(probe, op_writev);
-    capabilities.supports_accept = probe_supports(probe, op_accept);
-    capabilities.supports_connect = probe_supports(probe, op_connect);
-    capabilities.supports_fsync = probe_supports(probe, op_fsync);
-    capabilities.supports_cancel = probe_supports(probe, op_async_cancel);
-    capabilities.supports_files = capabilities.supports_read &&
-                                  capabilities.supports_write &&
-                                  capabilities.supports_fsync;
-    capabilities.supports_registered_buffers =
-        probe_supports(probe, op_read_fixed) && probe_supports(probe, op_write_fixed);
-    capabilities.supports_registered_files = probe_supports(probe, op_files_update);
+    capabilities = detail::capabilities_from_io_uring_probe_opcodes(
+        std::span<const unsigned>{supported_opcodes.data(), supported_count});
 }
 
 #endif
@@ -134,6 +125,37 @@ void apply_probe(io_uring_capabilities& capabilities,
 }
 
 } // namespace
+
+namespace detail {
+
+io_uring_capabilities capabilities_from_io_uring_probe_opcodes(
+    std::span<const unsigned> supported_opcodes) noexcept {
+    const auto has_opcode = [supported_opcodes](unsigned opcode) noexcept {
+        for (const auto supported : supported_opcodes) {
+            if (supported == opcode) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    io_uring_capabilities capabilities{.available = true};
+    capabilities.supports_read = has_opcode(op_read) || has_opcode(op_readv);
+    capabilities.supports_write = has_opcode(op_write) || has_opcode(op_writev);
+    capabilities.supports_accept = has_opcode(op_accept);
+    capabilities.supports_connect = has_opcode(op_connect);
+    capabilities.supports_fsync = has_opcode(op_fsync);
+    capabilities.supports_cancel = has_opcode(op_async_cancel);
+    capabilities.supports_files = capabilities.supports_read &&
+                                  capabilities.supports_write &&
+                                  capabilities.supports_fsync;
+    capabilities.supports_registered_buffers =
+        has_opcode(op_read_fixed) && has_opcode(op_write_fixed);
+    capabilities.supports_registered_files = has_opcode(op_files_update);
+    return capabilities;
+}
+
+} // namespace detail
 
 io_uring_capabilities detect_io_uring_capabilities() noexcept {
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_register)

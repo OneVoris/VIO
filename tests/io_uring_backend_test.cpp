@@ -2,10 +2,28 @@
 
 #include <array>
 #include <cstddef>
+#include <span>
 
 #include "test_assert.hpp"
 
+namespace voris::io::backends::detail {
+
+[[nodiscard]] io_uring_capabilities capabilities_from_io_uring_probe_opcodes(
+    std::span<const unsigned> supported_opcodes) noexcept;
+
+} // namespace voris::io::backends::detail
+
 namespace {
+
+constexpr unsigned uapi_op_read = 22U;
+constexpr unsigned uapi_op_write = 23U;
+constexpr unsigned uapi_op_fsync = 3U;
+constexpr unsigned uapi_op_read_fixed = 4U;
+constexpr unsigned uapi_op_write_fixed = 5U;
+constexpr unsigned uapi_op_accept = 13U;
+constexpr unsigned uapi_op_async_cancel = 14U;
+constexpr unsigned uapi_op_connect = 16U;
+constexpr unsigned uapi_op_files_update = 20U;
 
 voris::io::backend_operation operation(std::size_t id,
                                        voris::io::backend_operation_kind kind,
@@ -97,6 +115,115 @@ void test_default_eligibility_requires_core_capabilities() {
         &voris::io::backends::io_uring_capabilities::supports_fsync);
     assert_not_default_eligible_when(
         &voris::io::backends::io_uring_capabilities::supports_cancel);
+}
+
+void test_probe_opcode_mapping_is_deterministic() {
+    constexpr std::array supported{
+        uapi_op_read,         uapi_op_write,     uapi_op_fsync,
+        uapi_op_accept,       uapi_op_connect,   uapi_op_async_cancel,
+        uapi_op_read_fixed,   uapi_op_write_fixed,
+        uapi_op_files_update,
+    };
+
+    const auto caps =
+        voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+            supported);
+
+    assert(caps.available);
+    assert(caps.supports_read);
+    assert(caps.supports_write);
+    assert(caps.supports_fsync);
+    assert(caps.supports_files);
+    assert(caps.supports_accept);
+    assert(caps.supports_connect);
+    assert(caps.supports_cancel);
+    assert(caps.supports_registered_buffers);
+    assert(caps.supports_registered_files);
+}
+
+void test_probe_files_require_read_write_and_fsync() {
+    {
+        constexpr std::array supported{uapi_op_read, uapi_op_write, uapi_op_fsync};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(caps.supports_read);
+        assert(caps.supports_write);
+        assert(caps.supports_fsync);
+        assert(caps.supports_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_write, uapi_op_fsync};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(!caps.supports_read);
+        assert(caps.supports_write);
+        assert(caps.supports_fsync);
+        assert(!caps.supports_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_read, uapi_op_fsync};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(caps.supports_read);
+        assert(!caps.supports_write);
+        assert(caps.supports_fsync);
+        assert(!caps.supports_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_read, uapi_op_write};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(caps.supports_read);
+        assert(caps.supports_write);
+        assert(!caps.supports_fsync);
+        assert(!caps.supports_files);
+    }
+}
+
+void test_probe_registered_capabilities_are_independent_candidates() {
+    {
+        constexpr std::array supported{uapi_op_read_fixed};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(!caps.supports_registered_buffers);
+        assert(!caps.supports_registered_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_write_fixed};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(!caps.supports_registered_buffers);
+        assert(!caps.supports_registered_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_read_fixed, uapi_op_write_fixed};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(caps.supports_registered_buffers);
+        assert(!caps.supports_registered_files);
+    }
+
+    {
+        constexpr std::array supported{uapi_op_files_update};
+        const auto caps =
+            voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
+                supported);
+        assert(!caps.supports_registered_buffers);
+        assert(caps.supports_registered_files);
+        assert(!caps.supports_files);
+    }
 }
 
 void test_submit_rejects_missing_operation_opcodes() {
@@ -198,6 +325,9 @@ int main() {
     using namespace voris::io;
 
     test_default_eligibility_requires_core_capabilities();
+    test_probe_opcode_mapping_is_deterministic();
+    test_probe_files_require_read_write_and_fsync();
+    test_probe_registered_capabilities_are_independent_candidates();
     test_submit_rejects_missing_operation_opcodes();
     test_optional_registrations_follow_capabilities();
     test_detected_capabilities_are_conservative();
