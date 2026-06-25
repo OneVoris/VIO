@@ -264,6 +264,7 @@ void test_executor_shutdown_drains_queued_file_work() {
     blocker.release();
     shutdown_thread.join();
 
+    assert(!written.is_ready());
     pump_until_ready(owner, written);
     auto write_result = std::move(written).take_result();
     assert(write_result.has_value());
