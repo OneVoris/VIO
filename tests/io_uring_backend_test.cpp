@@ -178,6 +178,13 @@ voris::io::backends::io_uring_capabilities core_capabilities() {
     };
 }
 
+voris::io::backends::io_uring_capabilities registered_resource_capabilities() {
+    auto caps = core_capabilities();
+    caps.supports_registered_buffers = true;
+    caps.supports_registered_files = true;
+    return caps;
+}
+
 voris::io::backends::io_uring_capabilities capability_for(
     voris::io::backend_operation_kind kind) {
     voris::io::backends::io_uring_capabilities caps{.available = true};
@@ -1052,6 +1059,61 @@ void test_linux_real_io_uring_submit_requires_cancel_for_kernel_liveness() {
     assert_void_unsupported(backend.submit(read_operation(971, *token, output)));
     assert(backend.shutdown().has_value());
 }
+
+void test_linux_real_io_uring_registered_buffers_lifecycle_when_supported() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_registered_buffers) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    std::array<std::byte, 4096> storage{};
+    const std::array buffers{
+        voris::io::backends::io_uring_registered_buffer{
+            .bytes = std::span<std::byte>{storage}},
+    };
+
+    auto registered = backend.register_buffers(buffers);
+    if (!registered.has_value()) {
+        return;
+    }
+
+    assert(backend.registered_buffer_count() == 1);
+    assert_void_error(backend.register_buffers(buffers),
+                      voris::io::vio_error_code::invalid_state);
+    assert(backend.unregister_buffers().has_value());
+    assert(backend.registered_buffer_count() == 0);
+    assert(backend.register_buffers(buffers).has_value());
+    assert(backend.shutdown().has_value());
+    assert(backend.registered_buffer_count() == 0);
+}
+
+void test_linux_real_io_uring_registered_files_lifecycle_when_supported() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_registered_files) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto file = make_temporary_file();
+    const auto token = backend.register_handle(static_cast<std::size_t>(file.get()));
+    assert(token.has_value());
+    const std::array files{*token};
+
+    auto registered = backend.register_files(files);
+    if (!registered.has_value()) {
+        return;
+    }
+
+    assert(backend.registered_file_count() == 1);
+    assert_void_error(backend.register_files(files),
+                      voris::io::vio_error_code::invalid_state);
+    assert(backend.unregister_files().has_value());
+    assert(backend.registered_file_count() == 0);
+    assert(backend.register_files(files).has_value());
+    assert(backend.shutdown().has_value());
+    assert(backend.registered_file_count() == 0);
+}
 #endif
 
 void assert_not_default_eligible_when(
@@ -1375,6 +1437,10 @@ void test_optional_registrations_follow_capabilities() {
     {
         voris::io::backends::io_uring_backend backend(core_capabilities(),
                                                       deterministic_options());
+        assert_void_error(backend.register_buffers(0),
+                          voris::io::vio_error_code::invalid_state);
+        assert_void_error(backend.register_files(0),
+                          voris::io::vio_error_code::invalid_state);
         assert_void_unsupported(backend.register_buffers(2));
         assert_void_unsupported(backend.register_files(2));
     }
@@ -1388,6 +1454,13 @@ void test_optional_registrations_follow_capabilities() {
         voris::io::backends::io_uring_backend backend(caps, deterministic_options());
         assert_void_unsupported(backend.register_buffers(2));
         assert_void_unsupported(backend.register_files(2));
+        assert_void_error(
+            backend.register_buffers(
+                std::span<const voris::io::backends::io_uring_registered_buffer>{}),
+            voris::io::vio_error_code::invalid_state);
+        assert_void_error(
+            backend.register_files(std::span<const voris::io::backend_handle_token>{}),
+            voris::io::vio_error_code::invalid_state);
     }
 
     {
@@ -1395,7 +1468,14 @@ void test_optional_registrations_follow_capabilities() {
         caps.supports_registered_buffers = true;
 
         voris::io::backends::io_uring_backend backend(caps, deterministic_options());
-        assert(backend.register_buffers(2).has_value());
+        std::array<std::byte, 16> storage{};
+        const std::array buffers{
+            voris::io::backends::io_uring_registered_buffer{
+                .bytes = std::span<std::byte>{storage}},
+        };
+        assert_void_error(backend.register_buffers(2),
+                          voris::io::vio_error_code::invalid_state);
+        assert(backend.register_buffers(buffers).has_value());
         assert_void_unsupported(backend.register_files(2));
     }
 
@@ -1404,9 +1484,151 @@ void test_optional_registrations_follow_capabilities() {
         caps.supports_registered_files = true;
 
         voris::io::backends::io_uring_backend backend(caps, deterministic_options());
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+        const std::array files{*token};
         assert_void_unsupported(backend.register_buffers(2));
-        assert(backend.register_files(2).has_value());
+        assert_void_error(backend.register_files(2),
+                          voris::io::vio_error_code::invalid_state);
+        assert(backend.register_files(files).has_value());
     }
+}
+
+void test_registered_resource_lifecycle_rejects_duplicates_and_reregisters() {
+    voris::io::backends::io_uring_backend backend(registered_resource_capabilities(),
+                                                  deterministic_options());
+    std::array<std::byte, 32> storage{};
+    const std::array buffers{
+        voris::io::backends::io_uring_registered_buffer{
+            .bytes = std::span<std::byte>{storage}},
+    };
+
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+    const std::array files{*token};
+
+    assert_void_error(
+        backend.register_buffers(
+            std::span<const voris::io::backends::io_uring_registered_buffer>{}),
+        voris::io::vio_error_code::invalid_state);
+    assert_void_error(
+        backend.register_files(std::span<const voris::io::backend_handle_token>{}),
+        voris::io::vio_error_code::invalid_state);
+    assert_void_error(backend.unregister_buffers(),
+                      voris::io::vio_error_code::invalid_state);
+    assert_void_error(backend.unregister_files(),
+                      voris::io::vio_error_code::invalid_state);
+
+    assert(backend.register_buffers(buffers).has_value());
+    assert(backend.registered_buffer_count() == 1);
+    assert_void_error(backend.register_buffers(buffers),
+                      voris::io::vio_error_code::invalid_state);
+    assert(backend.unregister_buffers().has_value());
+    assert(backend.registered_buffer_count() == 0);
+    assert_void_error(backend.unregister_buffers(),
+                      voris::io::vio_error_code::invalid_state);
+    assert(backend.register_buffers(buffers).has_value());
+
+    assert(backend.register_files(files).has_value());
+    assert(backend.registered_file_count() == 1);
+    assert_void_error(backend.register_files(files),
+                      voris::io::vio_error_code::invalid_state);
+    assert(backend.unregister_files().has_value());
+    assert(backend.registered_file_count() == 0);
+    assert_void_error(backend.unregister_files(),
+                      voris::io::vio_error_code::invalid_state);
+    assert(backend.register_files(files).has_value());
+
+    assert(backend.shutdown().has_value());
+}
+
+void test_registered_files_are_released_when_registered_handle_closes() {
+    voris::io::backends::io_uring_backend backend(registered_resource_capabilities(),
+                                                  deterministic_options());
+    const auto first = backend.register_handle(1);
+    const auto second = backend.register_handle(2);
+    assert(first.has_value());
+    assert(second.has_value());
+
+    const std::array first_files{*first};
+    const std::array second_files{*second};
+
+    assert(backend.register_files(first_files).has_value());
+    assert(backend.registered_file_count() == 1);
+    assert(backend.close_handle(*first).has_value());
+    assert(backend.registered_file_count() == 0);
+    assert(backend.register_files(second_files).has_value());
+    assert(backend.registered_file_count() == 1);
+    assert(backend.shutdown().has_value());
+}
+
+void test_registered_resources_shutdown_and_destructor_cleanup() {
+    auto caps = registered_resource_capabilities();
+    std::array<std::byte, 32> storage{};
+    const std::array buffers{
+        voris::io::backends::io_uring_registered_buffer{
+            .bytes = std::span<std::byte>{storage}},
+    };
+
+    {
+        voris::io::backends::io_uring_backend backend(caps, deterministic_options());
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+        const std::array files{*token};
+
+        assert(backend.register_buffers(buffers).has_value());
+        assert(backend.register_files(files).has_value());
+        assert(backend.shutdown().has_value());
+        assert(backend.registered_buffer_count() == 0);
+        assert(backend.registered_file_count() == 0);
+        assert_void_error(backend.unregister_buffers(),
+                          voris::io::vio_error_code::closed);
+        assert_void_error(backend.unregister_files(),
+                          voris::io::vio_error_code::closed);
+    }
+
+    voris::io::backends::detail::io_uring_test_kernel kernel{};
+    {
+        voris::io::backends::io_uring_backend backend(caps, test_kernel_options());
+        attach_test_kernel(backend, kernel);
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+        const std::array files{*token};
+
+        assert(backend.register_buffers(buffers).has_value());
+        assert(backend.register_files(files).has_value());
+    }
+
+    assert(kernel.unregister_buffers_calls == 1);
+    assert(kernel.unregister_files_calls == 1);
+}
+
+void test_registered_resources_do_not_change_default_submit_mode() {
+    auto caps = registered_resource_capabilities();
+    voris::io::backends::io_uring_backend backend(caps, test_kernel_options());
+    voris::io::backends::detail::io_uring_test_kernel kernel{};
+    attach_test_kernel(backend, kernel);
+
+    std::array<std::byte, 8> storage{};
+    const std::array buffers{
+        voris::io::backends::io_uring_registered_buffer{
+            .bytes = std::span<std::byte>{storage}},
+    };
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+    const std::array files{*token};
+
+    assert(backend.register_buffers(buffers).has_value());
+    assert(backend.register_files(files).has_value());
+    assert(backend.submit(read_operation(301, *token, storage)).has_value());
+    assert(backend.poll().has_value());
+
+    assert(kernel.submissions.size() == 1);
+    assert(kernel.submissions.front().operation_id == 301);
+    assert(!kernel.submissions.front().used_registered_buffer);
+    assert(!kernel.submissions.front().used_registered_file);
+
+    assert(backend.shutdown().has_value());
 }
 
 void test_lifecycle_state_tracks_availability_and_shutdown() {
@@ -2316,7 +2538,7 @@ void test_socket_operations_interact_with_queued_cancellation_and_shutdown() {
 
 void test_detected_capabilities_are_conservative() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
-    voris::io::backends::io_uring_backend backend(caps);
+    voris::io::backends::io_uring_backend backend(caps, deterministic_options());
     assert(backend.capabilities().available == caps.available);
 
 #if defined(__linux__)
@@ -2337,16 +2559,25 @@ void test_detected_capabilities_are_conservative() {
         assert(caps.supports_cancel);
     }
 
+    std::array<std::byte, 16> storage{};
+    const std::array buffers{
+        voris::io::backends::io_uring_registered_buffer{
+            .bytes = std::span<std::byte>{storage}},
+    };
     if (caps.supports_registered_buffers) {
-        assert(backend.register_buffers(2).has_value());
+        assert(backend.register_buffers(buffers).has_value());
     } else {
-        assert_void_unsupported(backend.register_buffers(2));
+        assert_void_unsupported(backend.register_buffers(buffers));
     }
 
+    auto file = make_temporary_file();
+    const auto token = backend.register_handle(static_cast<std::size_t>(file.get()));
+    assert(token.has_value());
+    const std::array files{*token};
     if (caps.supports_registered_files) {
-        assert(backend.register_files(2).has_value());
+        assert(backend.register_files(files).has_value());
     } else {
-        assert_void_unsupported(backend.register_files(2));
+        assert_void_unsupported(backend.register_files(files));
     }
 #else
     assert_no_capabilities(caps);
@@ -2373,6 +2604,10 @@ int main() {
     test_socket_operation_kinds_accept_only_with_matching_capability();
     test_submit_rejects_non_socket_operation_kinds();
     test_optional_registrations_follow_capabilities();
+    test_registered_resource_lifecycle_rejects_duplicates_and_reregisters();
+    test_registered_files_are_released_when_registered_handle_closes();
+    test_registered_resources_shutdown_and_destructor_cleanup();
+    test_registered_resources_do_not_change_default_submit_mode();
     test_lifecycle_state_tracks_availability_and_shutdown();
     test_empty_completion_drain_is_invalid_state();
     test_submit_validates_operation_before_queueing();
@@ -2413,6 +2648,8 @@ int main() {
     test_linux_real_io_uring_shutdown_cancels_submitted_read_without_data();
     test_linux_real_io_uring_async_cancel_of_submitted_read_completes_once();
     test_linux_real_io_uring_submit_requires_cancel_for_kernel_liveness();
+    test_linux_real_io_uring_registered_buffers_lifecycle_when_supported();
+    test_linux_real_io_uring_registered_files_lifecycle_when_supported();
 #endif
 
     auto caps = backends::io_uring_capabilities{

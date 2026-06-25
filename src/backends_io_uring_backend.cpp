@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #endif
 
@@ -194,6 +195,14 @@ void apply_probe(io_uring_capabilities& capabilities,
         return std::unexpected(invalid_state_error("io_uring buffer size does not fit u32"));
     }
     return static_cast<unsigned>(size);
+}
+
+[[nodiscard]] io_result<unsigned> count_as_u32(std::size_t count,
+                                               std::string diagnostic) {
+    if (count > static_cast<std::size_t>(std::numeric_limits<unsigned>::max())) {
+        return std::unexpected(invalid_state_error(std::move(diagnostic)));
+    }
+    return static_cast<unsigned>(count);
 }
 
 [[nodiscard]] io_result<int> native_handle_as_fd(std::size_t native_handle) {
@@ -577,7 +586,9 @@ io_uring_backend::io_uring_backend(io_uring_capabilities capabilities,
                                    io_uring_backend_options options)
     : capabilities_(capabilities), options_(normalize_options(options)) {}
 
-io_uring_backend::~io_uring_backend() = default;
+io_uring_backend::~io_uring_backend() {
+    (void)release_registered_resources();
+}
 
 const io_uring_capabilities& io_uring_backend::capabilities() const noexcept {
     return capabilities_;
@@ -598,6 +609,14 @@ bool io_uring_backend::default_eligible() const noexcept {
            capabilities_.supports_write && capabilities_.supports_accept &&
            capabilities_.supports_connect && capabilities_.supports_files &&
            capabilities_.supports_fsync && capabilities_.supports_cancel;
+}
+
+std::size_t io_uring_backend::registered_buffer_count() const noexcept {
+    return registered_buffers_.size();
+}
+
+std::size_t io_uring_backend::registered_file_count() const noexcept {
+    return registered_files_.size();
 }
 
 io_result<backend_handle_token> io_uring_backend::register_handle(std::size_t native_handle) {
@@ -702,6 +721,9 @@ void_result io_uring_backend::close_handle(backend_handle_token token) {
     if (!fallback_.is_current_handle(token)) {
         return std::unexpected(invalid_state_error("backend handle token is not current"));
     }
+    if (auto released = release_registered_files_for(token); !released.has_value()) {
+        return released;
+    }
     if (use_kernel_submission()) {
         if (auto cancelled = request_kernel_cancellations_for(token); !cancelled.has_value()) {
             return cancelled;
@@ -774,6 +796,10 @@ void_result io_uring_backend::shutdown() {
         return {};
     }
 
+    if (auto released = release_registered_resources(); !released.has_value()) {
+        return released;
+    }
+
     if (use_kernel_submission()) {
         if (auto cancelled = request_kernel_cancellations_for({}); !cancelled.has_value()) {
             return cancelled;
@@ -801,11 +827,74 @@ void_result io_uring_backend::register_buffers(std::size_t count) {
     if (closed_) {
         return std::unexpected(closed_error());
     }
+    if (count == 0) {
+        return std::unexpected(invalid_state_error(
+            "io_uring registered buffer count must be non-zero"));
+    }
     if (!capabilities_.available || !capabilities_.supports_registered_buffers) {
         return std::unexpected(make_error(vio_error_code::unsupported,
                                           "registered buffers unavailable"));
     }
-    registered_buffers_ = count;
+    if (!registered_buffers_.empty()) {
+        return std::unexpected(invalid_state_error(
+            "io_uring buffers are already registered"));
+    }
+    return std::unexpected(invalid_state_error(
+        "io_uring buffer registration requires borrowed buffer views"));
+}
+
+void_result io_uring_backend::register_buffers(
+    std::span<const io_uring_registered_buffer> buffers) {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
+    if (buffers.empty()) {
+        return std::unexpected(invalid_state_error(
+            "io_uring registered buffer list must not be empty"));
+    }
+    if (!capabilities_.available || !capabilities_.supports_registered_buffers) {
+        return std::unexpected(make_error(vio_error_code::unsupported,
+                                          "registered buffers unavailable"));
+    }
+    if (!registered_buffers_.empty()) {
+        return std::unexpected(invalid_state_error(
+            "io_uring buffers are already registered"));
+    }
+    if (auto count = count_as_u32(buffers.size(),
+                                  "io_uring registered buffer count does not fit u32");
+        !count.has_value()) {
+        return std::unexpected(count.error());
+    }
+    for (const auto& buffer : buffers) {
+        if (buffer.bytes.empty() || buffer.bytes.data() == nullptr) {
+            return std::unexpected(invalid_state_error(
+                "io_uring registered buffers must reference non-empty storage"));
+        }
+    }
+
+    if (auto registered = register_buffers_with_provider(buffers);
+        !registered.has_value()) {
+        return registered;
+    }
+
+    registered_buffers_.assign(buffers.begin(), buffers.end());
+    return {};
+}
+
+void_result io_uring_backend::unregister_buffers() {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
+    if (registered_buffers_.empty()) {
+        return std::unexpected(invalid_state_error(
+            "io_uring buffers are not registered"));
+    }
+
+    if (auto unregistered = unregister_buffers_with_provider();
+        !unregistered.has_value()) {
+        return unregistered;
+    }
+    registered_buffers_.clear();
     return {};
 }
 
@@ -813,11 +902,85 @@ void_result io_uring_backend::register_files(std::size_t count) {
     if (closed_) {
         return std::unexpected(closed_error());
     }
+    if (count == 0) {
+        return std::unexpected(invalid_state_error(
+            "io_uring registered file count must be non-zero"));
+    }
     if (!capabilities_.available || !capabilities_.supports_registered_files) {
         return std::unexpected(make_error(vio_error_code::unsupported,
                                           "registered files unavailable"));
     }
-    registered_files_ = count;
+    if (!registered_files_.empty()) {
+        return std::unexpected(invalid_state_error(
+            "io_uring files are already registered"));
+    }
+    return std::unexpected(invalid_state_error(
+        "io_uring file registration requires backend handle tokens"));
+}
+
+void_result io_uring_backend::register_files(
+    std::span<const backend_handle_token> files) {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
+    if (files.empty()) {
+        return std::unexpected(invalid_state_error(
+            "io_uring registered file list must not be empty"));
+    }
+    if (!capabilities_.available || !capabilities_.supports_registered_files) {
+        return std::unexpected(make_error(vio_error_code::unsupported,
+                                          "registered files unavailable"));
+    }
+    if (!registered_files_.empty()) {
+        return std::unexpected(invalid_state_error(
+            "io_uring files are already registered"));
+    }
+    if (auto count = count_as_u32(files.size(),
+                                  "io_uring registered file count does not fit u32");
+        !count.has_value()) {
+        return std::unexpected(count.error());
+    }
+
+    for (std::size_t index = 0; index < files.size(); ++index) {
+        if (!fallback_.is_current_handle(files[index])) {
+            return std::unexpected(invalid_state_error(
+                "io_uring registered file token is not current"));
+        }
+        if (auto fd = native_handle_as_fd(files[index].native_handle);
+            !fd.has_value()) {
+            return std::unexpected(fd.error());
+        }
+        for (std::size_t previous = 0; previous < index; ++previous) {
+            if (files[previous] == files[index]) {
+                return std::unexpected(invalid_state_error(
+                    "io_uring registered file tokens must be unique"));
+            }
+        }
+    }
+
+    if (auto registered = register_files_with_provider(files);
+        !registered.has_value()) {
+        return registered;
+    }
+
+    registered_files_.assign(files.begin(), files.end());
+    return {};
+}
+
+void_result io_uring_backend::unregister_files() {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
+    if (registered_files_.empty()) {
+        return std::unexpected(invalid_state_error(
+            "io_uring files are not registered"));
+    }
+
+    if (auto unregistered = unregister_files_with_provider();
+        !unregistered.has_value()) {
+        return unregistered;
+    }
+    registered_files_.clear();
     return {};
 }
 
@@ -831,6 +994,28 @@ bool io_uring_backend::use_test_kernel_submission() const noexcept {
 
 bool io_uring_backend::has_inflight_kernel_work() const noexcept {
     return !kernel_operations_.empty() || !kernel_cancel_operation_ids_.empty();
+}
+
+bool io_uring_backend::registered_files_contains(
+    backend_handle_token token) const noexcept {
+    return std::ranges::find(registered_files_, token) != registered_files_.end();
+}
+
+void_result io_uring_backend::ensure_kernel_ring() {
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
+    if (kernel_ring_) {
+        return {};
+    }
+
+    auto created = kernel_ring::create(options_.submission_queue_capacity);
+    if (!created.has_value()) {
+        return std::unexpected(created.error());
+    }
+    kernel_ring_ = std::move(*created);
+    return {};
+#else
+    return std::unexpected(unavailable_error());
+#endif
 }
 
 void_result io_uring_backend::validate_kernel_operation(
@@ -893,6 +1078,184 @@ void_result io_uring_backend::validate_kernel_operation(
         invalid_state_error("io_uring kernel submission requires a known operation"));
 }
 
+void_result io_uring_backend::register_buffers_with_provider(
+    std::span<const io_uring_registered_buffer> buffers) {
+    if (!use_kernel_submission()) {
+        return {};
+    }
+    if (use_test_kernel_submission()) {
+        ++test_kernel_->register_buffers_calls;
+        return {};
+    }
+
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter) && \
+    defined(SYS_io_uring_register)
+    if (auto ensured = ensure_kernel_ring(); !ensured.has_value()) {
+        return ensured;
+    }
+
+    std::vector<iovec> iovecs{};
+    iovecs.reserve(buffers.size());
+    for (const auto& buffer : buffers) {
+        iovecs.push_back(iovec{
+            .iov_base = buffer.bytes.data(),
+            .iov_len = buffer.bytes.size(),
+        });
+    }
+
+    const auto count =
+        count_as_u32(iovecs.size(),
+                     "io_uring registered buffer count does not fit u32");
+    if (!count.has_value()) {
+        return std::unexpected(count.error());
+    }
+
+    const long result =
+        ::syscall(SYS_io_uring_register, kernel_ring_->fd,
+                  IORING_REGISTER_BUFFERS, iovecs.data(), *count);
+    if (result < 0) {
+        return std::unexpected(provider_failure(errno));
+    }
+    return {};
+#else
+    (void)buffers;
+    return std::unexpected(unavailable_error());
+#endif
+}
+
+void_result io_uring_backend::unregister_buffers_with_provider() {
+    if (!use_kernel_submission()) {
+        return {};
+    }
+    if (use_test_kernel_submission()) {
+        ++test_kernel_->unregister_buffers_calls;
+        return {};
+    }
+
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter) && \
+    defined(SYS_io_uring_register)
+    if (!kernel_ring_) {
+        return std::unexpected(
+            invalid_state_error("io_uring buffer unregister requires an active ring"));
+    }
+    const long result =
+        ::syscall(SYS_io_uring_register, kernel_ring_->fd,
+                  IORING_UNREGISTER_BUFFERS, nullptr, 0U);
+    if (result < 0) {
+        return std::unexpected(provider_failure(errno));
+    }
+    return {};
+#else
+    return std::unexpected(unavailable_error());
+#endif
+}
+
+void_result io_uring_backend::register_files_with_provider(
+    std::span<const backend_handle_token> files) {
+    if (!use_kernel_submission()) {
+        return {};
+    }
+    if (use_test_kernel_submission()) {
+        ++test_kernel_->register_files_calls;
+        return {};
+    }
+
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter) && \
+    defined(SYS_io_uring_register)
+    if (auto ensured = ensure_kernel_ring(); !ensured.has_value()) {
+        return ensured;
+    }
+
+    std::vector<int> descriptors{};
+    descriptors.reserve(files.size());
+    for (const auto file : files) {
+        auto fd = native_handle_as_fd(file.native_handle);
+        if (!fd.has_value()) {
+            return std::unexpected(fd.error());
+        }
+        descriptors.push_back(*fd);
+    }
+
+    const auto count =
+        count_as_u32(descriptors.size(),
+                     "io_uring registered file count does not fit u32");
+    if (!count.has_value()) {
+        return std::unexpected(count.error());
+    }
+
+    const long result =
+        ::syscall(SYS_io_uring_register, kernel_ring_->fd,
+                  IORING_REGISTER_FILES, descriptors.data(), *count);
+    if (result < 0) {
+        return std::unexpected(provider_failure(errno));
+    }
+    return {};
+#else
+    (void)files;
+    return std::unexpected(unavailable_error());
+#endif
+}
+
+void_result io_uring_backend::unregister_files_with_provider() {
+    if (!use_kernel_submission()) {
+        return {};
+    }
+    if (use_test_kernel_submission()) {
+        ++test_kernel_->unregister_files_calls;
+        return {};
+    }
+
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter) && \
+    defined(SYS_io_uring_register)
+    if (!kernel_ring_) {
+        return std::unexpected(
+            invalid_state_error("io_uring file unregister requires an active ring"));
+    }
+    const long result =
+        ::syscall(SYS_io_uring_register, kernel_ring_->fd,
+                  IORING_UNREGISTER_FILES, nullptr, 0U);
+    if (result < 0) {
+        return std::unexpected(provider_failure(errno));
+    }
+    return {};
+#else
+    return std::unexpected(unavailable_error());
+#endif
+}
+
+void_result io_uring_backend::release_registered_resources() {
+    if (!registered_buffers_.empty()) {
+        if (auto unregistered = unregister_buffers_with_provider();
+            !unregistered.has_value()) {
+            return unregistered;
+        }
+        registered_buffers_.clear();
+    }
+
+    if (!registered_files_.empty()) {
+        if (auto unregistered = unregister_files_with_provider();
+            !unregistered.has_value()) {
+            return unregistered;
+        }
+        registered_files_.clear();
+    }
+
+    return {};
+}
+
+void_result io_uring_backend::release_registered_files_for(
+    backend_handle_token token) {
+    if (!registered_files_contains(token)) {
+        return {};
+    }
+    if (auto unregistered = unregister_files_with_provider();
+        !unregistered.has_value()) {
+        return unregistered;
+    }
+    registered_files_.clear();
+    return {};
+}
+
 void_result io_uring_backend::submit_to_fallback(queued_submission queued) {
     auto submitted = fallback_.submit(queued.operation);
     if (!submitted.has_value()) {
@@ -912,12 +1275,8 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
     }
 
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
-    if (!kernel_ring_) {
-        auto created = kernel_ring::create(options_.submission_queue_capacity);
-        if (!created.has_value()) {
-            return std::unexpected(created.error());
-        }
-        kernel_ring_ = std::move(*created);
+    if (auto ensured = ensure_kernel_ring(); !ensured.has_value()) {
+        return ensured;
     }
 
     const auto fd = native_handle_as_fd(operation.handle.native_handle);
@@ -1010,6 +1369,12 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
 
 void_result io_uring_backend::submit_to_test_kernel(
     const backend_operation& operation) {
+    test_kernel_->submissions.push_back(
+        detail::io_uring_test_submission{
+            .operation_id = operation.id,
+            .used_registered_buffer = false,
+            .used_registered_file = false,
+        });
     kernel_operations_.emplace(operation.id,
                                io_uring_backend::kernel_operation{.operation = operation});
     return {};
