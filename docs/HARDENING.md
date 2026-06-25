@@ -9,6 +9,26 @@ Required release gates:
   the platform supports them.
 - End-to-end overload and memory ceiling tests.
 
+## End-to-End Overload Gate
+
+`vio_e2e_overload_test` is the `VIO-M8-004` gate for scheduler lag, overload
+recovery, and bounded memory pressure:
+
+```bash
+xmake run vio_e2e_overload_test
+```
+
+The scheduler-lag scenario runs against an actual shard loop and records
+backlog delay through `runtime_metrics.scheduler_lag`. The overload-recovery
+scenario proves a full bounded shard queue reports `resource_exhausted`, drains
+accepted work, and then accepts later work.
+
+There is no RSS hard-limit API in VIO. The memory ceiling proxy for M8 is the
+owner-derived hard capacity on bounded queues, operation slots, channels, and
+executors. The e2e gate exercises the bounded executor queue and reservation
+path, verifies excess work returns `resource_exhausted`, and checks rejected
+work neither runs later nor leaves persistent queue growth.
+
 ## ThreadSanitizer Coverage
 
 The `ThreadSanitizer` GitHub Actions workflow registers VXrepo explicitly,

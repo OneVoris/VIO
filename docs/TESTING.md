@@ -91,6 +91,27 @@ budget per family. Both variables must be unsigned decimal digits with no
 leading sign. Capture the printed `VIO_HARDENING_STRESS` evidence line in
 release validation notes.
 
+## End-to-End Overload
+
+`VIO-M8-004` is covered by `vio_e2e_overload_test`:
+
+```bash
+xmake run vio_e2e_overload_test
+```
+
+The target runs bounded end-to-end checks for scheduler lag, overload recovery,
+and memory ceilings. The scheduler-lag scenario uses a real shard loop and a
+condition-variable backlog so a queued continuation waits long enough to record
+`runtime_metrics.scheduler_lag` above a stable threshold. The overload-recovery
+scenario fills a shard queue, verifies `resource_exhausted`, drains accepted
+work, and then proves the shard accepts and completes later work.
+
+VIO does not expose a process RSS limiter. The memory-ceiling check therefore
+uses owner-derived hard capacity as the proxy: a bounded executor queue and its
+reserved-slot path reject excess work with `resource_exhausted`, and the test
+asserts rejected continuations do not execute later or leave unbounded queue
+state behind.
+
 ## Benchmark Record
 
 Every reported result includes commit, compiler, standard library, flags, CPU,
