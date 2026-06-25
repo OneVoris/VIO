@@ -97,7 +97,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M8-002** Add TSan jobs covering tasks, scopes, channels, mailboxes, and backends.
 - [x] **VIO-M8-003** Benchmark scheduler hops, task spawn, timers, channels, and socket ping-pong.
 - [x] **VIO-M8-004** Add end-to-end tests for scheduler lag, overload recovery, and memory ceilings.
-- [ ] **VIO-M8-005** Provide echo, fan-out, file-copy, and graceful-shutdown examples.
+- [x] **VIO-M8-005** Provide echo, fan-out, file-copy, and graceful-shutdown examples.
 - [ ] **VIO-M8-006** Document backend capabilities, limits, and failure modes.
 
 ## Definition of Done
