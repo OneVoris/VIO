@@ -4,7 +4,6 @@
 #include <deque>
 #include <optional>
 #include <span>
-#include <vector>
 
 #include <voris/io/error.hpp>
 

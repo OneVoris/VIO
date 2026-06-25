@@ -1,4 +1,5 @@
 #include <voris/io/socket.hpp>
+#include <voris/io/detail/socket_io_limits.hpp>
 
 #include <array>
 #include <cstddef>
@@ -9,6 +10,7 @@
 #if defined(__linux__)
 #include <cerrno>
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -46,6 +48,21 @@ void test_total_size() {
         buffer_chain_view{std::span<const std::byte>(second)},
     }};
     assert(total_size(buffers) == 8);
+}
+
+void test_socket_io_size_cap() {
+    using voris::io::detail::cap_socket_io_size;
+    using voris::io::detail::max_safe_socket_io_size;
+
+    const std::size_t cap = max_safe_socket_io_size();
+    assert(cap > 0);
+    assert(cap_socket_io_size(0) == 0);
+    assert(cap_socket_io_size(1) == 1);
+    assert(cap_socket_io_size(cap) == cap);
+    if (cap < std::numeric_limits<std::size_t>::max()) {
+        assert(cap_socket_io_size(cap + 1) == cap);
+    }
+    assert(cap_socket_io_size(std::numeric_limits<std::size_t>::max()) == cap);
 }
 
 #if defined(__linux__)
@@ -96,6 +113,12 @@ std::array<unique_fd, 2> make_pipe() {
     return {unique_fd(fds[0]), unique_fd(fds[1])};
 }
 
+std::array<unique_fd, 2> make_socket_pair() {
+    std::array<int, 2> fds{};
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds.data()) == 0);
+    return {unique_fd(fds[0]), unique_fd(fds[1])};
+}
+
 void set_nonblocking_fd(int fd) {
     const int flags = ::fcntl(fd, F_GETFL, 0);
     assert(flags != -1);
@@ -114,72 +137,132 @@ int release_nonzero_fd(unique_fd& fd) {
     return duplicate;
 }
 
-void test_linux_read_write_some_make_short_progress_without_taking_ownership() {
+void fill_socket_until_would_block(int fd) {
+    int send_buffer_size = 4096;
+    assert(::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buffer_size,
+                        static_cast<socklen_t>(sizeof(send_buffer_size))) == 0);
+
+    std::array<std::byte, 4096> chunk{};
+    for (std::size_t attempt = 0; attempt < 65536; ++attempt) {
+        const ssize_t count = ::send(fd, chunk.data(), chunk.size(), MSG_NOSIGNAL);
+        if (count > 0) {
+            continue;
+        }
+        assert(count == -1);
+        assert(errno == EAGAIN || errno == EWOULDBLOCK);
+        return;
+    }
+    assert(false);
+}
+
+void test_linux_read_some_reports_partial_progress_without_taking_ownership() {
     using voris::io::read_some;
     using voris::io::write_some;
 
-    auto pipe = make_pipe();
-    set_nonblocking_fd(pipe[0].get());
-    set_nonblocking_fd(pipe[1].get());
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    set_nonblocking_fd(sockets[1].get());
 
     const std::array<std::byte, 3> input{std::byte{0x61}, std::byte{0x62},
                                         std::byte{0x63}};
     voris::io::io_result<std::size_t> written =
-        write_some(static_cast<std::size_t>(pipe[1].get()), input);
+        write_some(static_cast<std::size_t>(sockets[1].get()), input);
     assert(written.has_value());
     assert(*written == input.size());
 
-    std::array<std::byte, 3> output{};
+    std::array<std::byte, 2> output{};
     voris::io::io_result<std::size_t> read =
-        read_some(static_cast<std::size_t>(pipe[0].get()), output);
+        read_some(static_cast<std::size_t>(sockets[0].get()), output);
     assert(read.has_value());
     assert(*read == output.size());
-    assert(output == input);
+    assert(output[0] == input[0]);
+    assert(output[1] == input[1]);
 
-    assert(::fcntl(pipe[0].get(), F_GETFD) != -1);
-    assert(::fcntl(pipe[1].get(), F_GETFD) != -1);
+    assert(::fcntl(sockets[0].get(), F_GETFD) != -1);
+    assert(::fcntl(sockets[1].get(), F_GETFD) != -1);
 
-    const std::array<std::byte, 1> next_input{std::byte{0x64}};
-    written = write_some(static_cast<std::size_t>(pipe[1].get()), next_input);
-    assert(written.has_value());
-    assert(*written == next_input.size());
-
-    std::array<std::byte, 1> next_output{};
-    read = read_some(static_cast<std::size_t>(pipe[0].get()), next_output);
+    std::array<std::byte, 1> rest{};
+    read = read_some(static_cast<std::size_t>(sockets[0].get()), rest);
     assert(read.has_value());
-    assert(*read == next_output.size());
-    assert(next_output == next_input);
+    assert(*read == rest.size());
+    assert(rest[0] == input[2]);
+}
+
+void test_linux_write_some_on_non_socket_reports_provider_error() {
+    using voris::io::vio_error_code;
+    using voris::io::write_some;
+
+    auto pipe = make_pipe();
+    set_nonblocking_fd(pipe[1].get());
+
+    const std::array<std::byte, 1> input{std::byte{0x64}};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(pipe[1].get()), input);
+    assert_size_error(written, vio_error_code::backend_failure);
+    assert(written.error().provider_code.has_value());
+    assert(*written.error().provider_code == ENOTSOCK);
 }
 
 void test_linux_would_block_read_uses_operation_in_progress() {
     using voris::io::read_some;
     using voris::io::vio_error_code;
 
-    auto pipe = make_pipe();
-    set_nonblocking_fd(pipe[0].get());
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
 
     std::array<std::byte, 1> output{};
     voris::io::io_result<std::size_t> read =
-        read_some(static_cast<std::size_t>(pipe[0].get()), output);
+        read_some(static_cast<std::size_t>(sockets[0].get()), output);
     assert_size_error(read, vio_error_code::operation_in_progress);
     assert(!read.error().provider_code.has_value());
+}
+
+void test_linux_would_block_write_uses_operation_in_progress() {
+    using voris::io::vio_error_code;
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    fill_socket_until_would_block(sockets[0].get());
+
+    const std::array<std::byte, 1> input{std::byte{0x65}};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(sockets[0].get()), input);
+    assert_size_error(written, vio_error_code::operation_in_progress);
+    assert(!written.error().provider_code.has_value());
+}
+
+void test_linux_closed_peer_write_reports_epipe_without_sigpipe() {
+    using voris::io::vio_error_code;
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    const int peer = sockets[1].release();
+    assert(::close(peer) == 0);
+
+    const std::array<std::byte, 1> input{std::byte{0x66}};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(sockets[0].get()), input);
+    assert_size_error(written, vio_error_code::backend_failure);
+    assert(written.error().provider_code.has_value());
+    assert(*written.error().provider_code == EPIPE);
 }
 
 void test_linux_zero_length_operations_return_zero() {
     using voris::io::read_some;
     using voris::io::write_some;
 
-    auto pipe = make_pipe();
-    set_nonblocking_fd(pipe[0].get());
-    set_nonblocking_fd(pipe[1].get());
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    set_nonblocking_fd(sockets[1].get());
 
     voris::io::io_result<std::size_t> read =
-        read_some(static_cast<std::size_t>(pipe[0].get()), std::span<std::byte>{});
+        read_some(static_cast<std::size_t>(sockets[0].get()), std::span<std::byte>{});
     assert(read.has_value());
     assert(*read == 0);
 
     voris::io::io_result<std::size_t> written =
-        write_some(static_cast<std::size_t>(pipe[1].get()), std::span<const std::byte>{});
+        write_some(static_cast<std::size_t>(sockets[1].get()), std::span<const std::byte>{});
     assert(written.has_value());
     assert(*written == 0);
 }
@@ -260,10 +343,14 @@ void test_non_linux_read_write_some_validation_and_unsupported() {
 int main() {
     test_socket_operation_queue();
     test_total_size();
+    test_socket_io_size_cap();
 
 #if defined(__linux__)
-    test_linux_read_write_some_make_short_progress_without_taking_ownership();
+    test_linux_read_some_reports_partial_progress_without_taking_ownership();
+    test_linux_write_some_on_non_socket_reports_provider_error();
     test_linux_would_block_read_uses_operation_in_progress();
+    test_linux_would_block_write_uses_operation_in_progress();
+    test_linux_closed_peer_write_reports_epipe_without_sigpipe();
     test_linux_zero_length_operations_return_zero();
     test_linux_invalid_handles_return_invalid_state();
     test_linux_closed_fd_reports_provider_error();

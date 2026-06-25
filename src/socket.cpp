@@ -1,10 +1,12 @@
 #include <voris/io/socket.hpp>
+#include <voris/io/detail/socket_io_limits.hpp>
 
 #include <cstdint>
 #include <limits>
 
 #if defined(__linux__)
 #include <cerrno>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -88,8 +90,9 @@ io_result<std::size_t> read_some(std::size_t native_handle, std::span<std::byte>
 
 #if defined(__linux__)
     const int fd = static_cast<int>(native_handle);
+    const std::size_t request_size = detail::cap_socket_io_size(buffer.size());
     for (;;) {
-        const ssize_t count = ::read(fd, buffer.data(), buffer.size());
+        const ssize_t count = ::read(fd, buffer.data(), request_size);
         if (count >= 0) {
             return static_cast<std::size_t>(count);
         }
@@ -121,8 +124,9 @@ io_result<std::size_t> write_some(std::size_t native_handle, std::span<const std
 
 #if defined(__linux__)
     const int fd = static_cast<int>(native_handle);
+    const std::size_t request_size = detail::cap_socket_io_size(buffer.size());
     for (;;) {
-        const ssize_t count = ::write(fd, buffer.data(), buffer.size());
+        const ssize_t count = ::send(fd, buffer.data(), request_size, MSG_NOSIGNAL);
         if (count >= 0) {
             return static_cast<std::size_t>(count);
         }
