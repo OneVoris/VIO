@@ -60,6 +60,12 @@ inline std::size_t drain(voris::io::backend& backend,
     return *drained;
 }
 
+inline void assert_poll_count(voris::io::backend& backend, std::size_t expected) {
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == expected);
+}
+
 inline void assert_completion_error(const voris::io::backend_completion& completion,
                                     std::size_t operation_id,
                                     voris::io::vio_error_code expected) {
@@ -81,6 +87,11 @@ public:
     [[nodiscard]] std::size_t recreate_native_handle_with_same_number(
         std::size_t native_handle) noexcept {
         return native_handle;
+    }
+
+    [[nodiscard]] std::size_t expected_poll_count_after_close(
+        std::size_t queued_completions) const noexcept {
+        return queued_completions;
     }
 
     voris::io::virtual_backend backend{};
@@ -165,6 +176,11 @@ public:
         return native_handle;
     }
 
+    [[nodiscard]] std::size_t expected_poll_count_after_close(
+        std::size_t) const noexcept {
+        return 0;
+    }
+
     voris::io::backends::epoll_backend backend{};
 
 private:
@@ -209,16 +225,20 @@ void test_submit_accepts_current_token_and_rejects_default_and_closed_tokens() {
     const auto token = require_token(fixture.backend.register_handle(fixture.make_native_handle()));
 
     assert(fixture.backend.submit(operation(10, backend_operation_kind::read, token)).has_value());
+    assert_void_error(fixture.backend.submit(operation(0, backend_operation_kind::read, token)),
+                      vio_error_code::invalid_state);
     assert_void_error(fixture.backend.submit(operation(11, backend_operation_kind::read, {})),
                       vio_error_code::invalid_state);
 
     assert(fixture.backend.close_handle(token).has_value());
     assert_void_error(fixture.backend.submit(operation(12, backend_operation_kind::write, token)),
                       vio_error_code::invalid_state);
+    assert_poll_count(fixture.backend, fixture.expected_poll_count_after_close(1));
 
     std::array<backend_completion, 4> completions{};
     assert(drain(fixture.backend, completions) == 1);
     assert_completion_error(completions[0], 10, vio_error_code::closed);
+    assert_poll_count(fixture.backend, 0);
     assert(drain(fixture.backend, completions) == 0);
 }
 
@@ -233,11 +253,13 @@ void test_close_handle_completes_all_pending_operations_once() {
     assert(fixture.backend.submit(operation(12, backend_operation_kind::write, token)).has_value());
 
     assert(fixture.backend.close_handle(token).has_value());
+    assert_poll_count(fixture.backend, fixture.expected_poll_count_after_close(2));
 
     std::array<backend_completion, 8> completions{};
     assert(drain(fixture.backend, completions) == 2);
     assert_completion_error(completions[0], 11, vio_error_code::closed);
     assert_completion_error(completions[1], 12, vio_error_code::closed);
+    assert_poll_count(fixture.backend, 0);
     assert(drain(fixture.backend, completions) == 0);
 
     assert_void_error(fixture.backend.cancel(11, cancellation_reason::manual),
@@ -314,10 +336,12 @@ void test_same_numeric_handle_reuse_gets_new_generation_and_rejects_stale_token(
 
     assert(fixture.backend.submit(operation(32, backend_operation_kind::read, reused)).has_value());
     assert(fixture.backend.close_handle(reused).has_value());
+    assert_poll_count(fixture.backend, fixture.expected_poll_count_after_close(1));
 
     std::array<backend_completion, 4> completions{};
     assert(drain(fixture.backend, completions) == 1);
     assert_completion_error(completions[0], 32, vio_error_code::closed);
+    assert_poll_count(fixture.backend, 0);
 }
 
 template <class Fixture>
@@ -350,7 +374,9 @@ void test_drain_empty_and_empty_span_behavior() {
     Fixture fixture;
     std::array<backend_completion, 2> completions{};
 
+    assert_poll_count(fixture.backend, 0);
     assert(drain(fixture.backend, completions) == 0);
+    assert_poll_count(fixture.backend, 0);
     assert_size_error(fixture.backend.drain_completions(std::span<backend_completion>{}),
                       vio_error_code::invalid_state);
 }
