@@ -53,7 +53,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 - [x] **VIO-M4-001** Define the backend contract for register, submit, cancel, poll, wake, and shutdown.
 - [x] **VIO-M4-002** Implement a generation-safe native-handle registry.
-- [ ] **VIO-M4-003** Implement epoll polling and `eventfd` wake-up.
+- [x] **VIO-M4-003** Implement epoll polling and `eventfd` wake-up.
 - [ ] **VIO-M4-004** Implement nonblocking `read_some` and `write_some`.
 - [ ] **VIO-M4-005** Implement accept and connect, including `EINPROGRESS` and `SO_ERROR` handling.
 - [x] **VIO-M4-006** Define and implement queueing rules for multiple read or write operations; reject undefined concurrent use.

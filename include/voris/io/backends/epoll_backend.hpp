@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <voris/io/backend.hpp>
 
 namespace voris::io::backends {
@@ -21,7 +23,16 @@ public:
     [[nodiscard]] void_result shutdown() override;
 
 private:
+#if defined(__linux__)
+    void close_owned_descriptors() noexcept;
+    [[nodiscard]] void_result initialization_result() const;
+#endif
+
     virtual_backend fallback_;
+    int epoll_fd_{-1};
+    int wake_fd_{-1};
+    bool stopped_{false};
+    std::optional<vio_error> initialization_error_{};
 };
 
 } // namespace voris::io::backends
