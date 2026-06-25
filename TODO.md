@@ -81,7 +81,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M6-005** Implement asynchronous cancellation and verify completion races.
 - [x] **VIO-M6-006** Add optional registered buffers and files without changing default ownership semantics.
 - [x] **VIO-M6-007** Add behavioral differential tests between epoll and io_uring.
-- [ ] **VIO-M6-008** Define default-enable criteria with benchmarks and fall back when capabilities are insufficient.
+- [x] **VIO-M6-008** Define default-enable criteria with benchmarks and fall back when capabilities are insufficient.
 
 ## M7 — kqueue and IOCP
 

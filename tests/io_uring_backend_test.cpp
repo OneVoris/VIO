@@ -1225,6 +1225,117 @@ void test_supports_files_is_default_eligibility_aggregate_not_submit_gate() {
     assert(backend.shutdown().has_value());
 }
 
+voris::io::backends::io_uring_default_enable_evidence release_evidence() {
+    return voris::io::backends::io_uring_default_enable_evidence{
+        .cancellation_races_passed = true,
+        .differential_tests_passed = true,
+        .benchmarks_passed = true,
+        .linux_real_provider_tests_passed = true,
+    };
+}
+
+void assert_default_selection_falls_back_when(
+    bool voris::io::backends::io_uring_capabilities::*field) {
+    auto caps = core_capabilities();
+    caps.*field = false;
+    const auto evidence = release_evidence();
+
+    assert(!voris::io::backends::io_uring_default_enable_eligible(
+        caps, evidence));
+    assert(voris::io::backends::select_default_linux_backend(caps, evidence) ==
+           voris::io::backends::linux_backend_choice::epoll);
+}
+
+void assert_default_selection_falls_back_without(
+    bool voris::io::backends::io_uring_default_enable_evidence::*field) {
+    const auto caps = core_capabilities();
+    auto evidence = release_evidence();
+    evidence.*field = false;
+
+    assert(!voris::io::backends::io_uring_default_enable_eligible(
+        caps, evidence));
+    assert(voris::io::backends::select_default_linux_backend(caps, evidence) ==
+           voris::io::backends::linux_backend_choice::epoll);
+}
+
+void test_default_selection_requires_core_capabilities_and_release_evidence() {
+    const auto caps = core_capabilities();
+    const auto evidence = release_evidence();
+
+    assert(voris::io::backends::io_uring_default_enable_eligible(caps,
+                                                                 evidence));
+    assert(voris::io::backends::select_default_linux_backend(caps, evidence) ==
+           voris::io::backends::linux_backend_choice::io_uring);
+
+    assert_default_selection_falls_back_when(
+        &voris::io::backends::io_uring_capabilities::available);
+    assert_default_selection_falls_back_when(
+        &voris::io::backends::io_uring_capabilities::supports_read);
+    assert_default_selection_falls_back_when(
+        &voris::io::backends::io_uring_capabilities::supports_write);
+    assert_default_selection_falls_back_when(
+        &voris::io::backends::io_uring_capabilities::supports_accept);
+    assert_default_selection_falls_back_when(
+        &voris::io::backends::io_uring_capabilities::supports_connect);
+    assert_default_selection_falls_back_when(
+        &voris::io::backends::io_uring_capabilities::supports_files);
+    assert_default_selection_falls_back_when(
+        &voris::io::backends::io_uring_capabilities::supports_fsync);
+    assert_default_selection_falls_back_when(
+        &voris::io::backends::io_uring_capabilities::supports_cancel);
+
+    assert_default_selection_falls_back_without(
+        &voris::io::backends::io_uring_default_enable_evidence::
+            cancellation_races_passed);
+    assert_default_selection_falls_back_without(
+        &voris::io::backends::io_uring_default_enable_evidence::
+            differential_tests_passed);
+    assert_default_selection_falls_back_without(
+        &voris::io::backends::io_uring_default_enable_evidence::
+            benchmarks_passed);
+    assert_default_selection_falls_back_without(
+        &voris::io::backends::io_uring_default_enable_evidence::
+            linux_real_provider_tests_passed);
+}
+
+void test_default_selection_treats_registered_resources_as_optional() {
+    auto caps = core_capabilities();
+    const auto evidence = release_evidence();
+
+    caps.supports_registered_buffers = false;
+    caps.supports_registered_files = false;
+    assert(voris::io::backends::io_uring_default_enable_eligible(caps,
+                                                                 evidence));
+    assert(voris::io::backends::select_default_linux_backend(caps, evidence) ==
+           voris::io::backends::linux_backend_choice::io_uring);
+
+    caps.supports_registered_buffers = true;
+    caps.supports_registered_files = true;
+    assert(voris::io::backends::io_uring_default_enable_eligible(caps,
+                                                                 evidence));
+    assert(voris::io::backends::select_default_linux_backend(caps, evidence) ==
+           voris::io::backends::linux_backend_choice::io_uring);
+}
+
+void test_default_selection_falls_back_for_unavailable_detected_caps() {
+    const auto evidence = release_evidence();
+    const voris::io::backends::io_uring_capabilities unavailable{};
+
+    assert(!voris::io::backends::io_uring_default_enable_eligible(
+        unavailable, evidence));
+    assert(voris::io::backends::select_default_linux_backend(unavailable,
+                                                             evidence) ==
+           voris::io::backends::linux_backend_choice::epoll);
+
+#if !defined(__linux__)
+    const auto detected = voris::io::backends::detect_io_uring_capabilities();
+    assert_no_capabilities(detected);
+    assert(voris::io::backends::select_default_linux_backend(detected,
+                                                             evidence) ==
+           voris::io::backends::linux_backend_choice::epoll);
+#endif
+}
+
 void test_probe_opcode_mapping_is_deterministic() {
     constexpr std::array supported{
         uapi_op_read,         uapi_op_write,     uapi_op_fsync,
@@ -2660,6 +2771,9 @@ int main() {
 
     test_default_eligibility_requires_core_capabilities();
     test_supports_files_is_default_eligibility_aggregate_not_submit_gate();
+    test_default_selection_requires_core_capabilities_and_release_evidence();
+    test_default_selection_treats_registered_resources_as_optional();
+    test_default_selection_falls_back_for_unavailable_detected_caps();
     test_backend_contract_carries_socket_payloads_and_results();
     test_backend_contract_carries_file_payloads_offsets_and_fsync();
     test_io_uring_close_completion_mapping_is_target_aware();

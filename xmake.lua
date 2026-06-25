@@ -101,6 +101,7 @@ end
 
 if has_config("build_benchmarks") then
     local benchmark_sources = {
+        backend_ping_pong = "benchmarks/backend_ping_pong_benchmark.cpp",
         timer_heap = "benchmarks/timer_heap_benchmark.cpp",
         scheduler = "benchmarks/scheduler_benchmark.cpp",
         channel = "benchmarks/channel_benchmark.cpp",

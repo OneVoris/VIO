@@ -138,6 +138,14 @@ void apply_probe(io_uring_capabilities& capabilities,
     return false;
 }
 
+[[nodiscard]] bool has_default_core_capabilities(
+    const io_uring_capabilities& capabilities) noexcept {
+    return capabilities.available && capabilities.supports_read &&
+           capabilities.supports_write && capabilities.supports_accept &&
+           capabilities.supports_connect && capabilities.supports_files &&
+           capabilities.supports_fsync && capabilities.supports_cancel;
+}
+
 [[nodiscard]] vio_error unavailable_error() {
     return make_error(vio_error_code::unsupported, "io_uring is unavailable");
 }
@@ -367,6 +375,24 @@ io_uring_capabilities detect_io_uring_capabilities() noexcept {
 #else
     return {};
 #endif
+}
+
+bool io_uring_default_enable_eligible(
+    io_uring_capabilities capabilities,
+    io_uring_default_enable_evidence evidence) noexcept {
+    return has_default_core_capabilities(capabilities) &&
+           evidence.cancellation_races_passed &&
+           evidence.differential_tests_passed && evidence.benchmarks_passed &&
+           evidence.linux_real_provider_tests_passed;
+}
+
+linux_backend_choice select_default_linux_backend(
+    io_uring_capabilities capabilities,
+    io_uring_default_enable_evidence evidence) noexcept {
+    if (io_uring_default_enable_eligible(capabilities, evidence)) {
+        return linux_backend_choice::io_uring;
+    }
+    return linux_backend_choice::epoll;
 }
 
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
@@ -605,10 +631,7 @@ io_uring_backend_state io_uring_backend::state() const noexcept {
 }
 
 bool io_uring_backend::default_eligible() const noexcept {
-    return capabilities_.available && capabilities_.supports_read &&
-           capabilities_.supports_write && capabilities_.supports_accept &&
-           capabilities_.supports_connect && capabilities_.supports_files &&
-           capabilities_.supports_fsync && capabilities_.supports_cancel;
+    return has_default_core_capabilities(capabilities_);
 }
 
 std::size_t io_uring_backend::registered_buffer_count() const noexcept {

@@ -1,9 +1,43 @@
 # io_uring Backend
 
 The io_uring backend is optional and is not the default Linux backend in M6.
-Linux continues to default to epoll until io_uring passes capability detection,
-exactly-once cancellation race tests, differential behavior tests, and benchmark
-criteria.
+Linux continues to default to epoll until release evidence explicitly satisfies
+all default-enable gates.
+
+## Default-Enable Gates
+
+M6 defines a pure, testable selection model without changing runtime backend
+construction. `io_uring_backend::default_eligible()` reports only the core
+capability gate for an already constructed backend. The release default decision
+uses `io_uring_default_enable_eligible(capabilities, evidence)` and
+`select_default_linux_backend(capabilities, evidence)`.
+
+The io_uring default-enable gates are:
+
+1. Core capability set: `available`, `supports_read`, `supports_write`,
+   `supports_accept`, `supports_connect`, `supports_files`, `supports_fsync`,
+   and `supports_cancel` must all be true.
+2. Exactly-once cancellation race gate: cancellation, close, shutdown, original
+   CQE, and cancel-ack races must pass the backend race tests.
+3. Behavioral differential gate: epoll and io_uring must pass the shared
+   behavior checks for invalid input, close, stale handles, shutdown, and real
+   Linux read/write behavior when available.
+4. Benchmark evidence gate: release evidence must include successful
+   `vio_backend_ping_pong_benchmark` records for epoll and io_uring on the same
+   Linux host and workload. At least three comparable runs must have
+   `result=ok`, equal operation counts, and io_uring median
+   `elapsed_ns / operations` no worse than 1.10x the epoll median unless an ADR
+   documents why a different release threshold is acceptable.
+5. Linux real-provider validation gate: real Linux io_uring tests must pass on
+   the release kernel/provider, not only the deterministic fallback or test
+   kernel.
+
+If any core capability or evidence gate is missing, `select_default_linux_backend`
+returns `linux_backend_choice::epoll`. M6 does not support a force-default flag;
+manual experiments may construct `io_uring_backend` explicitly, but they do not
+change the release default. The current M6 conclusion is conservative: io_uring
+remains non-default because release benchmark and real-provider evidence has not
+been recorded for the default decision.
 
 Registered buffers and files are optional optimizations. They do not change
 default VIO ownership semantics: VIO does not own caller storage, does not take
@@ -53,11 +87,14 @@ a later cleanup attempt still knows what must be released.
 `supports_registered_files` means the kernel probe reports the files-update
 opcode as a candidate for registered-file support. M6-006 defines the lifecycle
 and default-off semantics, but M6 still does not use fixed files by default.
+Registered buffers and registered files are optional optimizations and are not
+part of the default-enable core capability set.
 
 Capability detection is conservative. VIO first attempts a minimal
 `io_uring_setup` syscall and reports the backend unavailable when the syscall is
 missing, denied, or fails. When setup succeeds, VIO queries
 `IORING_REGISTER_PROBE` and only marks operation opcodes and optional registered
 buffer/file support that the probe reports as supported. A kernel that permits
-setup but does not support probing is treated as available but not default
-eligible.
+setup but does not support probing is treated as available but not core
+default-eligible, and the default selection helper falls back to epoll unless
+all release evidence gates are also satisfied.

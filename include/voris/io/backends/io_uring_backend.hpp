@@ -30,6 +30,18 @@ struct io_uring_capabilities {
     bool supports_registered_files{};
 };
 
+enum class linux_backend_choice {
+    epoll,
+    io_uring,
+};
+
+struct io_uring_default_enable_evidence {
+    bool cancellation_races_passed{};
+    bool differential_tests_passed{};
+    bool benchmarks_passed{};
+    bool linux_real_provider_tests_passed{};
+};
+
 struct io_uring_backend_options {
     std::size_t submission_queue_capacity{64};
     std::size_t submit_batch_limit{32};
@@ -51,6 +63,12 @@ enum class io_uring_backend_state {
 };
 
 [[nodiscard]] io_uring_capabilities detect_io_uring_capabilities() noexcept;
+[[nodiscard]] bool io_uring_default_enable_eligible(
+    io_uring_capabilities capabilities,
+    io_uring_default_enable_evidence evidence) noexcept;
+[[nodiscard]] linux_backend_choice select_default_linux_backend(
+    io_uring_capabilities capabilities,
+    io_uring_default_enable_evidence evidence) noexcept;
 
 namespace detail {
 
