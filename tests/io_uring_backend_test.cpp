@@ -360,7 +360,8 @@ voris::io::backends::io_uring_backend_options real_kernel_options() {
 
 void test_linux_real_io_uring_read_write_transfer_returns_byte_counts() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
-    if (!caps.available || !caps.supports_read || !caps.supports_write) {
+    if (!caps.available || !caps.supports_read || !caps.supports_write ||
+        !caps.supports_cancel) {
         return;
     }
 
@@ -393,7 +394,7 @@ void test_linux_real_io_uring_read_write_transfer_returns_byte_counts() {
 
 void test_linux_real_io_uring_accept_returns_usable_nonblocking_socket() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
-    if (!caps.available || !caps.supports_accept) {
+    if (!caps.available || !caps.supports_accept || !caps.supports_cancel) {
         return;
     }
 
@@ -439,7 +440,7 @@ void test_linux_real_io_uring_accept_returns_usable_nonblocking_socket() {
 
 void test_linux_real_io_uring_connect_completes() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
-    if (!caps.available || !caps.supports_connect) {
+    if (!caps.available || !caps.supports_connect || !caps.supports_cancel) {
         return;
     }
 
@@ -466,7 +467,7 @@ void test_linux_real_io_uring_connect_completes() {
 
 void test_linux_real_io_uring_read_provider_error_is_reported() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
-    if (!caps.available || !caps.supports_read) {
+    if (!caps.available || !caps.supports_read || !caps.supports_cancel) {
         return;
     }
 
@@ -486,7 +487,7 @@ void test_linux_real_io_uring_read_provider_error_is_reported() {
 
 void test_linux_real_io_uring_close_completes_queued_socket_operation() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
-    if (!caps.available || !caps.supports_read) {
+    if (!caps.available || !caps.supports_read || !caps.supports_cancel) {
         return;
     }
 
@@ -513,7 +514,7 @@ void test_linux_real_io_uring_close_completes_queued_socket_operation() {
 
 void test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
-    if (!caps.available || !caps.supports_read) {
+    if (!caps.available || !caps.supports_read || !caps.supports_cancel) {
         return;
     }
 
@@ -538,6 +539,76 @@ void test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion() 
 
     const auto completion = wait_for_real_completion(backend);
     assert_completion_error(completion, 951, voris::io::vio_error_code::closed);
+
+    for (std::size_t attempt = 0; attempt < 16; ++attempt) {
+        auto polled = backend.poll();
+        if (!polled.has_value()) {
+            assert(polled.error().classification == voris::io::vio_error_code::closed);
+            break;
+        }
+
+        auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(backend.shutdown().has_value());
+}
+
+void test_linux_real_io_uring_shutdown_cancels_submitted_read_without_data() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_read || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto sockets = make_socket_pair();
+    const auto token = backend.register_handle(static_cast<std::size_t>(sockets[0].get()));
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert(backend.submit(read_operation(961, *token, output)).has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+
+    assert(backend.shutdown().has_value());
+    assert(backend.state() == voris::io::backends::io_uring_backend_state::closed);
+
+    const auto completion = wait_for_real_completion(backend);
+    assert_completion_error(completion, 961, voris::io::vio_error_code::closed);
+
+    std::array<voris::io::backend_completion, 1> completions{};
+    for (std::size_t attempt = 0; attempt < 16; ++attempt) {
+        polled = backend.poll();
+        if (!polled.has_value()) {
+            assert(polled.error().classification == voris::io::vio_error_code::closed);
+            break;
+        }
+
+        auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void test_linux_real_io_uring_submit_requires_cancel_for_kernel_liveness() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_read) {
+        return;
+    }
+
+    caps.supports_cancel = false;
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto sockets = make_socket_pair();
+    const auto token = backend.register_handle(static_cast<std::size_t>(sockets[0].get()));
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert_void_unsupported(backend.submit(read_operation(971, *token, output)));
     assert(backend.shutdown().has_value());
 }
 #endif
@@ -1015,6 +1086,19 @@ void test_kernel_mode_queued_cancellation_is_rejected_before_recording() {
     assert_completion_error(completions[0], 101, voris::io::vio_error_code::closed);
 }
 
+void test_kernel_submission_requires_cancel_capability_for_close_liveness() {
+    auto caps = core_capabilities();
+    caps.supports_cancel = false;
+
+    voris::io::backends::io_uring_backend backend(caps);
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert_void_unsupported(backend.submit(read_operation(102, *token, output)));
+    assert(backend.shutdown().has_value());
+}
+
 void test_poll_flushes_submissions_in_batches() {
     voris::io::backends::io_uring_backend backend(
         core_capabilities(), deterministic_options(8, 2, 8));
@@ -1328,6 +1412,7 @@ int main() {
     test_submission_queue_is_bounded();
     test_queued_operation_can_be_cancelled_before_flush();
     test_kernel_mode_queued_cancellation_is_rejected_before_recording();
+    test_kernel_submission_requires_cancel_capability_for_close_liveness();
     test_poll_flushes_submissions_in_batches();
     test_socket_operations_flow_through_submission_batches_and_close_fifo();
     test_poll_observes_completions_in_batches_and_drain_preserves_order();
@@ -1342,6 +1427,8 @@ int main() {
     test_linux_real_io_uring_read_provider_error_is_reported();
     test_linux_real_io_uring_close_completes_queued_socket_operation();
     test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion();
+    test_linux_real_io_uring_shutdown_cancels_submitted_read_without_data();
+    test_linux_real_io_uring_submit_requires_cancel_for_kernel_liveness();
 #endif
 
     auto caps = backends::io_uring_capabilities{

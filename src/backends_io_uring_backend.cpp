@@ -44,6 +44,12 @@ constexpr unsigned op_connect = 16U;
 constexpr unsigned op_files_update = 20U;
 constexpr unsigned op_read = 22U;
 constexpr unsigned op_write = 23U;
+constexpr std::uint64_t cancel_user_data_tag = 1ULL << 63U;
+
+struct decoded_kernel_user_data {
+    std::size_t operation_id{};
+    bool is_cancel{};
+};
 
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_register)
 
@@ -168,6 +174,11 @@ void apply_probe(io_uring_capabilities& capabilities,
                       "io_uring submission queue is full");
 }
 
+[[nodiscard]] vio_error cancellation_required_error() {
+    return make_error(vio_error_code::unsupported,
+                      "io_uring socket operations require async cancel for close/shutdown liveness");
+}
+
 [[nodiscard]] void_result closed_completion() {
     return std::unexpected(make_error(vio_error_code::closed));
 }
@@ -197,6 +208,33 @@ void apply_probe(io_uring_capabilities& capabilities,
             "io_uring native handle must be a valid file descriptor"));
     }
     return static_cast<int>(native_handle);
+}
+
+[[nodiscard]] io_result<std::uint64_t> encode_operation_user_data(
+    std::size_t operation_id) {
+    const auto encoded = static_cast<std::uint64_t>(operation_id);
+    if ((encoded & cancel_user_data_tag) != 0U) {
+        return std::unexpected(invalid_state_error(
+            "io_uring operation id must fit the kernel user_data operation tag"));
+    }
+    return encoded;
+}
+
+[[nodiscard]] io_result<std::uint64_t> encode_cancel_user_data(
+    std::size_t operation_id) {
+    auto encoded = encode_operation_user_data(operation_id);
+    if (!encoded.has_value()) {
+        return std::unexpected(encoded.error());
+    }
+    return *encoded | cancel_user_data_tag;
+}
+
+[[nodiscard]] decoded_kernel_user_data decode_kernel_user_data(
+    std::uint64_t user_data) noexcept {
+    return decoded_kernel_user_data{
+        .operation_id = static_cast<std::size_t>(user_data & ~cancel_user_data_tag),
+        .is_cancel = (user_data & cancel_user_data_tag) != 0U,
+    };
 }
 
 } // namespace
@@ -487,6 +525,14 @@ void_result io_uring_backend::submit(backend_operation operation) {
     if (!supports_operation_kind(capabilities_, operation.kind)) {
         return std::unexpected(opcode_unavailable_error());
     }
+    if (use_kernel_submission()) {
+        if (!capabilities_.supports_cancel) {
+            return std::unexpected(cancellation_required_error());
+        }
+        if (auto user_data = encode_operation_user_data(operation.id); !user_data.has_value()) {
+            return std::unexpected(user_data.error());
+        }
+    }
     if (operation.id == 0) {
         return std::unexpected(invalid_state_error("operation id must be non-zero"));
     }
@@ -550,6 +596,9 @@ void_result io_uring_backend::close_handle(backend_handle_token token) {
         return std::unexpected(invalid_state_error("backend handle token is not current"));
     }
     if (use_kernel_submission()) {
+        if (auto cancelled = request_kernel_cancellations_for(token); !cancelled.has_value()) {
+            return cancelled;
+        }
         complete_queued_submissions_for(token, closed_completion());
     } else {
         if (auto flushed = flush_queued_submissions_for(token); !flushed.has_value()) {
@@ -561,7 +610,7 @@ void_result io_uring_backend::close_handle(backend_handle_token token) {
 
 io_result<std::size_t> io_uring_backend::poll() {
     if (closed_) {
-        if (use_kernel_submission() && !kernel_operations_.empty()) {
+        if (use_kernel_submission() && has_inflight_kernel_work()) {
             return observe_completion_batch();
         }
         return std::unexpected(closed_error());
@@ -612,6 +661,12 @@ void_result io_uring_backend::shutdown() {
         return {};
     }
 
+    if (use_kernel_submission()) {
+        if (auto cancelled = request_kernel_cancellations_for({}); !cancelled.has_value()) {
+            return cancelled;
+        }
+    }
+
     closed_ = true;
     if (auto stopped = fallback_.shutdown(); !stopped.has_value()) {
         return stopped;
@@ -655,6 +710,10 @@ void_result io_uring_backend::register_files(std::size_t count) {
 
 bool io_uring_backend::use_kernel_submission() const noexcept {
     return options_.enable_kernel_submission;
+}
+
+bool io_uring_backend::has_inflight_kernel_work() const noexcept {
+    return !kernel_operations_.empty() || !kernel_cancel_operation_ids_.empty();
 }
 
 void_result io_uring_backend::validate_kernel_socket_operation(
@@ -744,7 +803,11 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
         return std::unexpected(fd.error());
     }
     sqe->fd = *fd;
-    sqe->user_data = operation.id;
+    const auto user_data = encode_operation_user_data(operation.id);
+    if (!user_data.has_value()) {
+        return std::unexpected(user_data.error());
+    }
+    sqe->user_data = *user_data;
 
     switch (operation.kind) {
     case backend_operation_kind::read: {
@@ -788,7 +851,8 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
             invalid_state_error("io_uring kernel submission requires a socket operation"));
     }
 
-    kernel_operations_.emplace(operation.id, operation);
+    kernel_operations_.emplace(operation.id,
+                               io_uring_backend::kernel_operation{.operation = operation});
     if (auto submitted = kernel_ring_->submit_one(); !submitted.has_value()) {
         kernel_operations_.erase(operation.id);
         completion_queue_.push_back(
@@ -796,6 +860,79 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
     }
     return {};
 #else
+    (void)operation;
+    return std::unexpected(unavailable_error());
+#endif
+}
+
+void_result io_uring_backend::request_kernel_cancellations_for(
+    backend_handle_token token) {
+    if (kernel_operations_.empty()) {
+        return {};
+    }
+    if (!capabilities_.supports_cancel) {
+        return std::unexpected(cancellation_required_error());
+    }
+
+    for (auto& [operation_id, operation] : kernel_operations_) {
+        if (token.generation != 0 && operation.operation.handle != token) {
+            continue;
+        }
+
+        if (operation.cancel_submitted) {
+            operation.close_requested = true;
+            continue;
+        }
+
+        if (auto cancelled = request_kernel_cancellation_for(operation_id, operation);
+            !cancelled.has_value()) {
+            return cancelled;
+        }
+        operation.close_requested = true;
+    }
+
+    return {};
+}
+
+void_result io_uring_backend::request_kernel_cancellation_for(
+    std::size_t operation_id,
+    kernel_operation& operation) {
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
+    if (!kernel_ring_) {
+        return std::unexpected(
+            invalid_state_error("io_uring kernel cancellation requires an active ring"));
+    }
+
+    const auto target_user_data = encode_operation_user_data(operation_id);
+    if (!target_user_data.has_value()) {
+        return std::unexpected(target_user_data.error());
+    }
+    const auto cancel_user_data = encode_cancel_user_data(operation_id);
+    if (!cancel_user_data.has_value()) {
+        return std::unexpected(cancel_user_data.error());
+    }
+
+    auto sqe_result = kernel_ring_->acquire_sqe();
+    if (!sqe_result.has_value()) {
+        return std::unexpected(sqe_result.error());
+    }
+
+    auto* sqe = *sqe_result;
+    sqe->opcode = IORING_OP_ASYNC_CANCEL;
+    sqe->fd = -1;
+    sqe->addr = *target_user_data;
+    sqe->cancel_flags = 0;
+    sqe->user_data = *cancel_user_data;
+
+    if (auto submitted = kernel_ring_->submit_one(); !submitted.has_value()) {
+        return std::unexpected(submitted.error());
+    }
+
+    operation.cancel_submitted = true;
+    kernel_cancel_operation_ids_.insert(operation_id);
+    return {};
+#else
+    (void)operation_id;
     (void)operation;
     return std::unexpected(unavailable_error());
 #endif
@@ -855,23 +992,37 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
     std::size_t visible = 0;
     for (std::size_t index = 0; index < count; ++index) {
         const auto& cqe = batch[index];
-        const auto operation_id = static_cast<std::size_t>(cqe.user_data);
+        const auto decoded = decode_kernel_user_data(cqe.user_data);
+        if (decoded.is_cancel) {
+            kernel_cancel_operation_ids_.erase(decoded.operation_id);
+            if (auto found = kernel_operations_.find(decoded.operation_id);
+                found != kernel_operations_.end()) {
+                found->second.cancel_submitted = false;
+            }
+            continue;
+        }
+
+        const auto operation_id = decoded.operation_id;
         const auto found = kernel_operations_.find(operation_id);
         if (found == kernel_operations_.end()) {
             continue;
         }
 
-        const backend_operation operation = found->second;
+        const auto operation = found->second;
         kernel_operations_.erase(found);
 
         backend_completion completion{};
         completion.operation_id = operation_id;
-        if (!fallback_.is_current_handle(operation.handle)) {
+        if (operation.close_requested ||
+            !fallback_.is_current_handle(operation.operation.handle)) {
+            if (operation.operation.kind == backend_operation_kind::accept && cqe.res >= 0) {
+                (void)::close(cqe.res);
+            }
             completion.result = closed_completion();
         } else if (cqe.res < 0) {
             completion.result = std::unexpected(provider_failure(-cqe.res));
         } else {
-            switch (operation.kind) {
+            switch (operation.operation.kind) {
             case backend_operation_kind::read:
             case backend_operation_kind::write:
                 completion.bytes_transferred = static_cast<std::size_t>(cqe.res);
