@@ -497,7 +497,11 @@ void iocp_backend::erase_operation_storage(std::size_t operation_id) {
 
     operation_id_by_overlapped_.erase(found->second->overlapped_address());
     operations_.erase(found);
-    std::erase(operation_submission_order_, operation_id);
+    if (const auto order = operation_order_by_id_.find(operation_id);
+        order != operation_order_by_id_.end()) {
+        operation_submission_order_.erase(order->second);
+        operation_order_by_id_.erase(order);
+    }
     maybe_close_stopped_port();
 }
 
@@ -793,6 +797,7 @@ void_result iocp_backend::submit(backend_operation operation) {
     operation_id_by_overlapped_[overlapped] = operation.id;
     operations_.emplace(operation.id, std::move(storage));
     operation_submission_order_.push_back(operation.id);
+    operation_order_by_id_[operation.id] = std::prev(operation_submission_order_.end());
     return {};
 #else
     (void)operation;

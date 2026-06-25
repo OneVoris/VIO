@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <list>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -237,7 +238,8 @@ private:
     std::deque<detail::iocp_native_completion_packet> native_packets_{};
     std::deque<backend_completion> completion_queue_{};
     std::unordered_map<std::size_t, std::unique_ptr<operation_storage>> operations_{};
-    std::deque<std::size_t> operation_submission_order_{};
+    std::list<std::size_t> operation_submission_order_{};
+    std::unordered_map<std::size_t, std::list<std::size_t>::iterator> operation_order_by_id_{};
     std::unordered_map<void*, std::size_t> operation_id_by_overlapped_{};
     std::unordered_set<std::size_t> active_operation_ids_{};
     std::vector<association_entry> associations_{};
