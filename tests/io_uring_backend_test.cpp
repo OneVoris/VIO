@@ -510,6 +510,36 @@ void test_linux_real_io_uring_close_completes_queued_socket_operation() {
     assert(*drained == 0);
     assert(backend.shutdown().has_value());
 }
+
+void test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_read) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto sockets = make_socket_pair();
+    const auto token = backend.register_handle(static_cast<std::size_t>(sockets[0].get()));
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert(backend.submit(read_operation(951, *token, output)).has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+
+    assert(backend.close_handle(*token).has_value());
+
+    std::array<voris::io::backend_completion, 1> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 0);
+
+    const auto completion = wait_for_real_completion(backend);
+    assert_completion_error(completion, 951, voris::io::vio_error_code::closed);
+    assert(backend.shutdown().has_value());
+}
 #endif
 
 void assert_not_default_eligible_when(
@@ -645,7 +675,7 @@ void test_probe_files_require_read_write_and_fsync() {
         const auto caps =
             voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
                 supported);
-        assert(caps.supports_read);
+        assert(!caps.supports_read);
         assert(!caps.supports_write);
         assert(!caps.supports_fsync);
         assert(!caps.supports_files);
@@ -657,7 +687,7 @@ void test_probe_files_require_read_write_and_fsync() {
             voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
                 supported);
         assert(!caps.supports_read);
-        assert(caps.supports_write);
+        assert(!caps.supports_write);
         assert(!caps.supports_fsync);
         assert(!caps.supports_files);
     }
@@ -667,10 +697,10 @@ void test_probe_files_require_read_write_and_fsync() {
         const auto caps =
             voris::io::backends::detail::capabilities_from_io_uring_probe_opcodes(
                 supported);
-        assert(caps.supports_read);
-        assert(caps.supports_write);
+        assert(!caps.supports_read);
+        assert(!caps.supports_write);
         assert(caps.supports_fsync);
-        assert(caps.supports_files);
+        assert(!caps.supports_files);
     }
 }
 
@@ -965,6 +995,24 @@ void test_queued_operation_can_be_cancelled_before_flush() {
     assert(*drained == 2);
     assert_completion_error(completions[0], 1, voris::io::vio_error_code::closed);
     assert_completion_error(completions[1], 2, voris::io::vio_error_code::closed);
+}
+
+void test_kernel_mode_queued_cancellation_is_rejected_before_recording() {
+    voris::io::backends::io_uring_backend backend(core_capabilities());
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert(backend.submit(read_operation(101, *token, output)).has_value());
+
+    assert_void_unsupported(backend.cancel(101, voris::io::cancellation_reason::manual));
+    assert(backend.close_handle(*token).has_value());
+
+    std::array<voris::io::backend_completion, 1> completions{};
+    const auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_completion_error(completions[0], 101, voris::io::vio_error_code::closed);
 }
 
 void test_poll_flushes_submissions_in_batches() {
@@ -1279,6 +1327,7 @@ int main() {
     test_submit_validates_operation_before_queueing();
     test_submission_queue_is_bounded();
     test_queued_operation_can_be_cancelled_before_flush();
+    test_kernel_mode_queued_cancellation_is_rejected_before_recording();
     test_poll_flushes_submissions_in_batches();
     test_socket_operations_flow_through_submission_batches_and_close_fifo();
     test_poll_observes_completions_in_batches_and_drain_preserves_order();
@@ -1292,6 +1341,7 @@ int main() {
     test_linux_real_io_uring_connect_completes();
     test_linux_real_io_uring_read_provider_error_is_reported();
     test_linux_real_io_uring_close_completes_queued_socket_operation();
+    test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion();
 #endif
 
     auto caps = backends::io_uring_capabilities{

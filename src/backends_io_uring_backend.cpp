@@ -180,9 +180,6 @@ void apply_probe(io_uring_capabilities& capabilities,
     if (options.completion_batch_limit == 0) {
         options.completion_batch_limit = 1;
     }
-#if !defined(__linux__) || !defined(SYS_io_uring_setup) || !defined(SYS_io_uring_enter)
-    options.enable_kernel_submission = false;
-#endif
     return options;
 }
 
@@ -218,8 +215,8 @@ io_uring_capabilities capabilities_from_io_uring_probe_opcodes(
     };
 
     io_uring_capabilities capabilities{.available = true};
-    capabilities.supports_read = has_opcode(op_read) || has_opcode(op_readv);
-    capabilities.supports_write = has_opcode(op_write) || has_opcode(op_writev);
+    capabilities.supports_read = has_opcode(op_read);
+    capabilities.supports_write = has_opcode(op_write);
     capabilities.supports_accept = has_opcode(op_accept);
     capabilities.supports_connect = has_opcode(op_connect);
     capabilities.supports_fsync = has_opcode(op_fsync);
@@ -525,6 +522,11 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
             return pending.operation.id == operation_id;
     });
     if (queued != submission_queue_.end()) {
+        if (use_kernel_submission()) {
+            return std::unexpected(make_error(
+                vio_error_code::unsupported,
+                "io_uring queued cancellation is deferred to M6-005"));
+        }
         if (!queued->cancellation.has_value()) {
             queued->cancellation = reason;
         }
@@ -549,7 +551,6 @@ void_result io_uring_backend::close_handle(backend_handle_token token) {
     }
     if (use_kernel_submission()) {
         complete_queued_submissions_for(token, closed_completion());
-        complete_kernel_operations_for(token, closed_completion());
     } else {
         if (auto flushed = flush_queued_submissions_for(token); !flushed.has_value()) {
             return flushed;
@@ -560,6 +561,9 @@ void_result io_uring_backend::close_handle(backend_handle_token token) {
 
 io_result<std::size_t> io_uring_backend::poll() {
     if (closed_) {
+        if (use_kernel_submission() && !kernel_operations_.empty()) {
+            return observe_completion_batch();
+        }
         return std::unexpected(closed_error());
     }
     if (!capabilities_.available) {
@@ -621,7 +625,6 @@ void_result io_uring_backend::shutdown() {
             backend_completion{submission_queue_.front().operation.id, closed_completion()});
         submission_queue_.pop_front();
     }
-    complete_kernel_operations_for({}, closed_completion());
 
     return {};
 }
@@ -947,18 +950,6 @@ void io_uring_backend::complete_queued_submissions_for(backend_handle_token toke
             completion_queue_.push_back(
                 backend_completion{iterator->operation.id, result});
             iterator = submission_queue_.erase(iterator);
-            continue;
-        }
-        ++iterator;
-    }
-}
-
-void io_uring_backend::complete_kernel_operations_for(backend_handle_token token,
-                                                      const void_result& result) {
-    for (auto iterator = kernel_operations_.begin(); iterator != kernel_operations_.end();) {
-        if (token.generation == 0 || iterator->second.handle == token) {
-            completion_queue_.push_back(backend_completion{iterator->first, result});
-            iterator = kernel_operations_.erase(iterator);
             continue;
         }
         ++iterator;

@@ -86,8 +86,6 @@ private:
     [[nodiscard]] void_result flush_queued_submissions_for(backend_handle_token token);
     void complete_queued_submissions_for(backend_handle_token token,
                                          const void_result& result);
-    void complete_kernel_operations_for(backend_handle_token token,
-                                        const void_result& result);
 
     io_uring_capabilities capabilities_;
     io_uring_backend_options options_;
