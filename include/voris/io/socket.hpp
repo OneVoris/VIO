@@ -33,11 +33,16 @@ struct buffer_chain_view {
     std::span<const std::byte> bytes;
 };
 
+struct mutable_buffer_chain_view {
+    std::span<std::byte> bytes;
+};
+
 struct socket_address_view {
     std::span<const std::byte> bytes;
 };
 
 [[nodiscard]] std::size_t total_size(std::span<const buffer_chain_view> buffers) noexcept;
+[[nodiscard]] std::size_t total_size(std::span<const mutable_buffer_chain_view> buffers) noexcept;
 
 /// Borrowed native socket helpers. The caller keeps ownership and must pass an
 /// already-nonblocking socket descriptor or handle. Accepted handles are
@@ -47,8 +52,14 @@ struct socket_address_view {
 /// or file descriptors may fail with provider `ENOTSOCK`.
 [[nodiscard]] io_result<std::size_t> read_some(std::size_t native_handle,
                                                std::span<std::byte> buffer);
+[[nodiscard]] io_result<std::size_t> read_some(
+    std::size_t native_handle,
+    std::span<const mutable_buffer_chain_view> buffers);
 [[nodiscard]] io_result<std::size_t> write_some(std::size_t native_handle,
                                                 std::span<const std::byte> buffer);
+[[nodiscard]] io_result<std::size_t> write_some(
+    std::size_t native_handle,
+    std::span<const buffer_chain_view> buffers);
 [[nodiscard]] io_result<std::size_t> accept_one(std::size_t native_handle);
 [[nodiscard]] void_result start_connect(std::size_t native_handle,
                                         socket_address_view remote_address);

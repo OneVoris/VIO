@@ -2,6 +2,9 @@
 #include <voris/io/detail/socket_accept_errors.hpp>
 #include <voris/io/detail/socket_io_limits.hpp>
 
+#include <algorithm>
+#include <array>
+#include <climits>
 #include <cstdint>
 #include <limits>
 
@@ -9,6 +12,7 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #endif
 
@@ -31,6 +35,8 @@ namespace {
 }
 
 #if defined(__linux__)
+constexpr std::size_t local_iovec_capacity = 1024;
+
 [[nodiscard]] vio_error provider_failure(int provider_code) {
     return make_error(vio_error_code::backend_failure, static_cast<std::int64_t>(provider_code));
 }
@@ -42,6 +48,64 @@ namespace {
 [[nodiscard]] bool is_operation_in_progress_errno(int provider_code) noexcept {
     return provider_code == EINPROGRESS || provider_code == EALREADY ||
            provider_code == EAGAIN || provider_code == EWOULDBLOCK;
+}
+
+[[nodiscard]] std::size_t platform_iovec_limit() noexcept {
+    std::size_t limit = local_iovec_capacity;
+#if defined(IOV_MAX)
+    limit = std::min(limit, static_cast<std::size_t>(IOV_MAX));
+#endif
+#if defined(_SC_IOV_MAX)
+    errno = 0;
+    const long runtime_limit = ::sysconf(_SC_IOV_MAX);
+    if (runtime_limit > 0) {
+        limit = std::min(limit, static_cast<std::size_t>(runtime_limit));
+    }
+#endif
+    return std::max<std::size_t>(limit, 1);
+}
+
+[[nodiscard]] void* iovec_base(std::span<std::byte> bytes) noexcept {
+    return bytes.data();
+}
+
+[[nodiscard]] void* iovec_base(std::span<const std::byte> bytes) noexcept {
+    return const_cast<std::byte*>(bytes.data());
+}
+
+struct iovec_chain {
+    std::array<iovec, local_iovec_capacity> entries{};
+    std::size_t count = 0;
+    std::size_t requested = 0;
+};
+
+template <class Buffer>
+[[nodiscard]] iovec_chain build_iovec_chain(std::span<const Buffer> buffers) noexcept {
+    iovec_chain chain{};
+    const std::size_t iovec_limit = platform_iovec_limit();
+    std::size_t remaining = detail::max_safe_socket_io_size();
+
+    for (const auto& buffer : buffers) {
+        if (buffer.bytes.empty()) {
+            continue;
+        }
+        if (chain.count >= iovec_limit || remaining == 0) {
+            break;
+        }
+
+        const std::size_t length = std::min(buffer.bytes.size(), remaining);
+        chain.entries[chain.count].iov_base = iovec_base(buffer.bytes);
+        chain.entries[chain.count].iov_len = length;
+        ++chain.count;
+        chain.requested += length;
+        remaining -= length;
+    }
+
+    return chain;
+}
+
+[[nodiscard]] int iovec_count(std::size_t count) noexcept {
+    return static_cast<int>(count);
 }
 
 [[nodiscard]] void_result validate_socket_address(socket_address_view remote_address) {
@@ -69,6 +133,16 @@ namespace {
 [[nodiscard]] vio_error unsupported_socket_io_error() {
     return make_error(vio_error_code::unsupported,
                       "socket native helpers are only available on Linux");
+}
+
+template <class Buffer>
+[[nodiscard]] bool buffer_chain_is_empty(std::span<const Buffer> buffers) noexcept {
+    for (const auto& buffer : buffers) {
+        if (!buffer.bytes.empty()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -100,6 +174,14 @@ std::size_t socket_operation_queue::size(socket_operation_direction direction) c
 }
 
 std::size_t total_size(std::span<const buffer_chain_view> buffers) noexcept {
+    std::size_t total = 0;
+    for (const auto& buffer : buffers) {
+        total += buffer.bytes.size();
+    }
+    return total;
+}
+
+std::size_t total_size(std::span<const mutable_buffer_chain_view> buffers) noexcept {
     std::size_t total = 0;
     for (const auto& buffer : buffers) {
         total += buffer.bytes.size();
@@ -141,6 +223,45 @@ io_result<std::size_t> read_some(std::size_t native_handle, std::span<std::byte>
 #endif
 }
 
+io_result<std::size_t> read_some(std::size_t native_handle,
+                                 std::span<const mutable_buffer_chain_view> buffers) {
+    const void_result validation = validate_native_handle(native_handle);
+    if (!validation.has_value()) {
+        return std::unexpected(validation.error());
+    }
+    if (buffer_chain_is_empty(buffers)) {
+        return std::size_t{0};
+    }
+
+#if defined(__linux__)
+    auto chain = build_iovec_chain(buffers);
+    if (chain.count == 0 || chain.requested == 0) {
+        return std::size_t{0};
+    }
+
+    const int fd = static_cast<int>(native_handle);
+    for (;;) {
+        const ssize_t count = ::readv(fd, chain.entries.data(), iovec_count(chain.count));
+        if (count >= 0) {
+            return static_cast<std::size_t>(count);
+        }
+
+        const int provider_code = errno;
+        if (provider_code == EINTR) {
+            continue;
+        }
+        if (provider_code == EAGAIN || provider_code == EWOULDBLOCK) {
+            return std::unexpected(operation_in_progress_error());
+        }
+        return std::unexpected(provider_failure(provider_code));
+    }
+#else
+    (void)native_handle;
+    (void)buffers;
+    return std::unexpected(unsupported_socket_io_error());
+#endif
+}
+
 io_result<std::size_t> write_some(std::size_t native_handle, std::span<const std::byte> buffer) {
     const void_result validation = validate_native_handle(native_handle);
     if (!validation.has_value()) {
@@ -171,6 +292,49 @@ io_result<std::size_t> write_some(std::size_t native_handle, std::span<const std
 #else
     (void)native_handle;
     (void)buffer;
+    return std::unexpected(unsupported_socket_io_error());
+#endif
+}
+
+io_result<std::size_t> write_some(std::size_t native_handle,
+                                  std::span<const buffer_chain_view> buffers) {
+    const void_result validation = validate_native_handle(native_handle);
+    if (!validation.has_value()) {
+        return std::unexpected(validation.error());
+    }
+    if (buffer_chain_is_empty(buffers)) {
+        return std::size_t{0};
+    }
+
+#if defined(__linux__)
+    auto chain = build_iovec_chain(buffers);
+    if (chain.count == 0 || chain.requested == 0) {
+        return std::size_t{0};
+    }
+
+    const int fd = static_cast<int>(native_handle);
+    msghdr message{};
+    message.msg_iov = chain.entries.data();
+    message.msg_iovlen = chain.count;
+
+    for (;;) {
+        const ssize_t count = ::sendmsg(fd, &message, MSG_NOSIGNAL);
+        if (count >= 0) {
+            return static_cast<std::size_t>(count);
+        }
+
+        const int provider_code = errno;
+        if (provider_code == EINTR) {
+            continue;
+        }
+        if (provider_code == EAGAIN || provider_code == EWOULDBLOCK) {
+            return std::unexpected(operation_in_progress_error());
+        }
+        return std::unexpected(provider_failure(provider_code));
+    }
+#else
+    (void)native_handle;
+    (void)buffers;
     return std::unexpected(unsupported_socket_io_error());
 #endif
 }

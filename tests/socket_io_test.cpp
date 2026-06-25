@@ -50,6 +50,7 @@ void test_socket_operation_queue() {
 
 void test_total_size() {
     using voris::io::buffer_chain_view;
+    using voris::io::mutable_buffer_chain_view;
     using voris::io::total_size;
 
     std::array<std::byte, 3> first{};
@@ -59,6 +60,12 @@ void test_total_size() {
         buffer_chain_view{std::span<const std::byte>(second)},
     }};
     assert(total_size(buffers) == 8);
+
+    std::array<mutable_buffer_chain_view, 2> mutable_buffers{{
+        mutable_buffer_chain_view{std::span<std::byte>(first)},
+        mutable_buffer_chain_view{std::span<std::byte>(second)},
+    }};
+    assert(total_size(mutable_buffers) == 8);
 }
 
 void test_socket_io_size_cap() {
@@ -407,6 +414,53 @@ void test_linux_read_some_reports_partial_progress_without_taking_ownership() {
     assert(rest[0] == input[2]);
 }
 
+void test_linux_vector_read_write_preserves_buffer_order_and_partial_progress() {
+    using voris::io::buffer_chain_view;
+    using voris::io::mutable_buffer_chain_view;
+    using voris::io::read_some;
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    set_nonblocking_fd(sockets[1].get());
+
+    const std::array<std::byte, 2> first{std::byte{0x76}, std::byte{0x69}};
+    const std::array<std::byte, 0> empty{};
+    const std::array<std::byte, 3> second{std::byte{0x6f}, std::byte{0x2d},
+                                         std::byte{0x76}};
+    const std::array<buffer_chain_view, 3> write_buffers{{
+        buffer_chain_view{std::span<const std::byte>(first)},
+        buffer_chain_view{std::span<const std::byte>(empty)},
+        buffer_chain_view{std::span<const std::byte>(second)},
+    }};
+
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(sockets[1].get()), write_buffers);
+    assert(written.has_value());
+    assert(*written == first.size() + second.size());
+
+    std::array<std::byte, 1> out_first{};
+    std::array<std::byte, 2> out_second{};
+    std::array<std::byte, 4> out_third{};
+    std::array<mutable_buffer_chain_view, 3> read_buffers{{
+        mutable_buffer_chain_view{std::span<std::byte>(out_first)},
+        mutable_buffer_chain_view{std::span<std::byte>(out_second)},
+        mutable_buffer_chain_view{std::span<std::byte>(out_third)},
+    }};
+
+    voris::io::io_result<std::size_t> read =
+        read_some(static_cast<std::size_t>(sockets[0].get()), read_buffers);
+    assert(read.has_value());
+    assert(*read == first.size() + second.size());
+    assert(out_first[0] == std::byte{0x76});
+    assert(out_second[0] == std::byte{0x69});
+    assert(out_second[1] == std::byte{0x6f});
+    assert(out_third[0] == std::byte{0x2d});
+    assert(out_third[1] == std::byte{0x76});
+    assert(out_third[2] == std::byte{0x00});
+    assert(out_third[3] == std::byte{0x00});
+}
+
 void test_linux_write_some_on_non_socket_reports_provider_error() {
     using voris::io::vio_error_code;
     using voris::io::write_some;
@@ -451,6 +505,43 @@ void test_linux_would_block_write_uses_operation_in_progress() {
     assert(!written.error().provider_code.has_value());
 }
 
+void test_linux_vector_would_block_read_uses_operation_in_progress() {
+    using voris::io::mutable_buffer_chain_view;
+    using voris::io::read_some;
+    using voris::io::vio_error_code;
+
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+
+    std::array<std::byte, 1> output{};
+    const std::array<mutable_buffer_chain_view, 1> buffers{{
+        mutable_buffer_chain_view{std::span<std::byte>(output)},
+    }};
+    voris::io::io_result<std::size_t> read =
+        read_some(static_cast<std::size_t>(sockets[0].get()), buffers);
+    assert_size_error(read, vio_error_code::operation_in_progress);
+    assert(!read.error().provider_code.has_value());
+}
+
+void test_linux_vector_would_block_write_uses_operation_in_progress() {
+    using voris::io::buffer_chain_view;
+    using voris::io::vio_error_code;
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    fill_socket_until_would_block(sockets[0].get());
+
+    const std::array<std::byte, 1> input{std::byte{0x65}};
+    const std::array<buffer_chain_view, 1> buffers{{
+        buffer_chain_view{std::span<const std::byte>(input)},
+    }};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(sockets[0].get()), buffers);
+    assert_size_error(written, vio_error_code::operation_in_progress);
+    assert(!written.error().provider_code.has_value());
+}
+
 void test_linux_closed_peer_write_reports_epipe_without_sigpipe() {
     using voris::io::vio_error_code;
     using voris::io::write_some;
@@ -462,6 +553,26 @@ void test_linux_closed_peer_write_reports_epipe_without_sigpipe() {
     const std::array<std::byte, 1> input{std::byte{0x66}};
     voris::io::io_result<std::size_t> written =
         write_some(static_cast<std::size_t>(sockets[0].get()), input);
+    assert_size_error(written, vio_error_code::backend_failure);
+    assert(written.error().provider_code.has_value());
+    assert(*written.error().provider_code == EPIPE);
+}
+
+void test_linux_vector_closed_peer_write_reports_epipe_without_sigpipe() {
+    using voris::io::buffer_chain_view;
+    using voris::io::vio_error_code;
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    const int peer = sockets[1].release();
+    assert(::close(peer) == 0);
+
+    const std::array<std::byte, 1> input{std::byte{0x66}};
+    const std::array<buffer_chain_view, 1> buffers{{
+        buffer_chain_view{std::span<const std::byte>(input)},
+    }};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(sockets[0].get()), buffers);
     assert_size_error(written, vio_error_code::backend_failure);
     assert(written.error().provider_code.has_value());
     assert(*written.error().provider_code == EPIPE);
@@ -486,6 +597,53 @@ void test_linux_zero_length_operations_return_zero() {
     assert(*written == 0);
 }
 
+void test_linux_vector_zero_length_operations_return_zero_and_skip_empty_segments() {
+    using voris::io::buffer_chain_view;
+    using voris::io::mutable_buffer_chain_view;
+    using voris::io::read_some;
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    set_nonblocking_fd(sockets[1].get());
+
+    const std::array<std::byte, 0> empty_write{};
+    const std::array<buffer_chain_view, 2> zero_write_buffers{{
+        buffer_chain_view{std::span<const std::byte>(empty_write)},
+        buffer_chain_view{std::span<const std::byte>{}},
+    }};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(sockets[1].get()), zero_write_buffers);
+    assert(written.has_value());
+    assert(*written == 0);
+
+    std::array<std::byte, 0> empty_read{};
+    const std::array<mutable_buffer_chain_view, 2> zero_read_buffers{{
+        mutable_buffer_chain_view{std::span<std::byte>(empty_read)},
+        mutable_buffer_chain_view{std::span<std::byte>{}},
+    }};
+    voris::io::io_result<std::size_t> read =
+        read_some(static_cast<std::size_t>(sockets[0].get()), zero_read_buffers);
+    assert(read.has_value());
+    assert(*read == 0);
+
+    const std::array<std::byte, 2> payload{std::byte{0x61}, std::byte{0x62}};
+    const std::array<buffer_chain_view, 3> mixed_write_buffers{{
+        buffer_chain_view{std::span<const std::byte>{}},
+        buffer_chain_view{std::span<const std::byte>(payload)},
+        buffer_chain_view{std::span<const std::byte>(empty_write)},
+    }};
+    written = write_some(static_cast<std::size_t>(sockets[1].get()), mixed_write_buffers);
+    assert(written.has_value());
+    assert(*written == payload.size());
+
+    std::array<std::byte, 2> output{};
+    read = read_some(static_cast<std::size_t>(sockets[0].get()), output);
+    assert(read.has_value());
+    assert(*read == output.size());
+    assert(output == payload);
+}
+
 void test_linux_invalid_handles_return_invalid_state() {
     using voris::io::read_some;
     using voris::io::vio_error_code;
@@ -500,6 +658,17 @@ void test_linux_invalid_handles_return_invalid_state() {
     assert_size_error(write_some(0, input), vio_error_code::invalid_state);
     assert_size_error(read_some(too_large, buffer), vio_error_code::invalid_state);
     assert_size_error(write_some(too_large, input), vio_error_code::invalid_state);
+
+    const std::array<voris::io::mutable_buffer_chain_view, 1> read_buffers{{
+        voris::io::mutable_buffer_chain_view{std::span<std::byte>(buffer)},
+    }};
+    const std::array<voris::io::buffer_chain_view, 1> write_buffers{{
+        voris::io::buffer_chain_view{std::span<const std::byte>(input)},
+    }};
+    assert_size_error(read_some(0, read_buffers), vio_error_code::invalid_state);
+    assert_size_error(write_some(0, write_buffers), vio_error_code::invalid_state);
+    assert_size_error(read_some(too_large, read_buffers), vio_error_code::invalid_state);
+    assert_size_error(write_some(too_large, write_buffers), vio_error_code::invalid_state);
 }
 
 void test_linux_closed_fd_reports_provider_error() {
@@ -538,9 +707,17 @@ void test_non_linux_read_write_some_validation_and_unsupported() {
 
     std::array<std::byte, 1> buffer{};
     const std::array<std::byte, 1> input{std::byte{0x61}};
+    const std::array<voris::io::mutable_buffer_chain_view, 1> read_buffers{{
+        voris::io::mutable_buffer_chain_view{std::span<std::byte>(buffer)},
+    }};
+    const std::array<voris::io::buffer_chain_view, 1> write_buffers{{
+        voris::io::buffer_chain_view{std::span<const std::byte>(input)},
+    }};
 
     assert_size_error(read_some(0, buffer), vio_error_code::invalid_state);
     assert_size_error(write_some(0, input), vio_error_code::invalid_state);
+    assert_size_error(read_some(0, read_buffers), vio_error_code::invalid_state);
+    assert_size_error(write_some(0, write_buffers), vio_error_code::invalid_state);
 
     voris::io::io_result<std::size_t> empty_read = read_some(1, std::span<std::byte>{});
     assert(empty_read.has_value());
@@ -551,8 +728,24 @@ void test_non_linux_read_write_some_validation_and_unsupported() {
     assert(empty_write.has_value());
     assert(*empty_write == 0);
 
+    const std::array<voris::io::mutable_buffer_chain_view, 1> empty_read_buffers{{
+        voris::io::mutable_buffer_chain_view{std::span<std::byte>{}},
+    }};
+    empty_read = read_some(1, empty_read_buffers);
+    assert(empty_read.has_value());
+    assert(*empty_read == 0);
+
+    const std::array<voris::io::buffer_chain_view, 1> empty_write_buffers{{
+        voris::io::buffer_chain_view{std::span<const std::byte>{}},
+    }};
+    empty_write = write_some(1, empty_write_buffers);
+    assert(empty_write.has_value());
+    assert(*empty_write == 0);
+
     assert_size_error(read_some(1, buffer), vio_error_code::unsupported);
     assert_size_error(write_some(1, input), vio_error_code::unsupported);
+    assert_size_error(read_some(1, read_buffers), vio_error_code::unsupported);
+    assert_size_error(write_some(1, write_buffers), vio_error_code::unsupported);
 }
 
 void test_non_linux_accept_connect_validation_and_unsupported() {
@@ -591,11 +784,16 @@ int main() {
     test_linux_refused_connect_reports_so_error_provider_failure();
     test_linux_accept_connect_validation();
     test_linux_read_some_reports_partial_progress_without_taking_ownership();
+    test_linux_vector_read_write_preserves_buffer_order_and_partial_progress();
     test_linux_write_some_on_non_socket_reports_provider_error();
     test_linux_would_block_read_uses_operation_in_progress();
     test_linux_would_block_write_uses_operation_in_progress();
+    test_linux_vector_would_block_read_uses_operation_in_progress();
+    test_linux_vector_would_block_write_uses_operation_in_progress();
     test_linux_closed_peer_write_reports_epipe_without_sigpipe();
+    test_linux_vector_closed_peer_write_reports_epipe_without_sigpipe();
     test_linux_zero_length_operations_return_zero();
+    test_linux_vector_zero_length_operations_return_zero_and_skip_empty_segments();
     test_linux_invalid_handles_return_invalid_state();
     test_linux_closed_fd_reports_provider_error();
 #else
