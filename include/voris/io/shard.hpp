@@ -63,6 +63,7 @@ private:
     backend_wakeup wakeup_;
     runtime_metrics metrics_;
     std::optional<vio_error> loop_error_;
+    mutable std::mutex lifecycle_mutex_;
     mutable std::mutex metrics_mutex_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};

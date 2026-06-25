@@ -27,18 +27,24 @@ void_result shard::submit(continuation next) {
     if (!next) {
         return std::unexpected(make_error(vio_error_code::invalid_state));
     }
-    if (stop_requested_) {
-        return std::unexpected(make_error(vio_error_code::invalid_state, "shard is stopped"));
-    }
 
-    auto result = mailbox_.submit(std::move(next));
+    void_result result{};
     {
-        std::lock_guard lock(metrics_mutex_);
-        metrics_.queue_depth = mailbox_.size();
-        if (result.has_value()) {
-            ++metrics_.submitted_tasks;
+        std::lock_guard lifecycle_lock(lifecycle_mutex_);
+        if (stop_requested_) {
+            return std::unexpected(make_error(vio_error_code::invalid_state, "shard is stopped"));
+        }
+
+        result = mailbox_.submit(std::move(next));
+        {
+            std::lock_guard lock(metrics_mutex_);
+            metrics_.queue_depth = mailbox_.size();
+            if (result.has_value()) {
+                ++metrics_.submitted_tasks;
+            }
         }
     }
+
     if (result.has_value()) {
         wakeup_.wake();
     }
@@ -49,18 +55,24 @@ void_result shard::submit_system(continuation next) {
     if (!next) {
         return std::unexpected(make_error(vio_error_code::invalid_state));
     }
-    if (stop_requested_) {
-        return std::unexpected(make_error(vio_error_code::invalid_state, "shard is stopped"));
-    }
 
-    auto result = mailbox_.submit_system(std::move(next));
+    void_result result{};
     {
-        std::lock_guard lock(metrics_mutex_);
-        metrics_.queue_depth = mailbox_.size();
-        if (result.has_value()) {
-            ++metrics_.submitted_tasks;
+        std::lock_guard lifecycle_lock(lifecycle_mutex_);
+        if (stop_requested_) {
+            return std::unexpected(make_error(vio_error_code::invalid_state, "shard is stopped"));
+        }
+
+        result = mailbox_.submit_system(std::move(next));
+        {
+            std::lock_guard lock(metrics_mutex_);
+            metrics_.queue_depth = mailbox_.size();
+            if (result.has_value()) {
+                ++metrics_.submitted_tasks;
+            }
         }
     }
+
     if (result.has_value()) {
         wakeup_.wake();
     }
@@ -142,6 +154,7 @@ void shard::run_queued_message(detail::mailbox::message message) {
 }
 
 void shard::start() {
+    std::lock_guard lifecycle_lock(lifecycle_mutex_);
     if (running_.exchange(true)) {
         return;
     }
@@ -154,7 +167,10 @@ void shard::start() {
 }
 
 void shard::request_stop() {
-    stop_requested_ = true;
+    {
+        std::lock_guard lifecycle_lock(lifecycle_mutex_);
+        stop_requested_ = true;
+    }
     wakeup_.wake();
 }
 

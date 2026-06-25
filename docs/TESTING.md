@@ -27,6 +27,34 @@
 - Fuzz configuration for parser/format targets.
 - Tier-1 compiler and operating-system matrix.
 
+## Hardening Stress
+
+The default hardening stress gate is included in `xmake test` through the
+`hardening_stress` test target:
+
+```bash
+xmake run vio_hardening_stress_test
+```
+
+Default mode is intentionally bounded for local and CI debug runs. To run the
+long cancellation, close, and shutdown race stress pass, set:
+
+```bash
+VIO_HARDENING_STRESS_MODE=long VIO_HARDENING_STRESS_SECONDS=120 xmake run vio_hardening_stress_test
+```
+
+Windows `cmd.exe` example:
+
+```bat
+set VIO_HARDENING_STRESS_MODE=long&& set VIO_HARDENING_STRESS_SECONDS=120&& xmake run vio_hardening_stress_test
+```
+
+`VIO_HARDENING_STRESS_SECONDS` is a per-stress-family budget, not a total
+process timeout. `VIO_HARDENING_STRESS_ITERATIONS` sets the minimum iteration
+budget per family. Both variables must be unsigned decimal digits with no
+leading sign. Capture the printed `VIO_HARDENING_STRESS` evidence line in
+release validation notes.
+
 ## Benchmark Record
 
 Every reported result includes commit, compiler, standard library, flags, CPU, operating system/kernel, workload, throughput, latency percentiles, peak RSS, allocations per operation, and errors/timeouts. A single RPS number is not a release argument.

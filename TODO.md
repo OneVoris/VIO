@@ -93,7 +93,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 ## M8 — Hardening, Benchmarks, and Release
 
-- [ ] **VIO-M8-001** Run long-duration cancellation, close, and shutdown race stress tests.
+- [x] **VIO-M8-001** Run long-duration cancellation, close, and shutdown race stress tests.
 - [ ] **VIO-M8-002** Add TSan jobs covering tasks, scopes, channels, mailboxes, and backends.
 - [ ] **VIO-M8-003** Benchmark scheduler hops, task spawn, timers, channels, and socket ping-pong.
 - [ ] **VIO-M8-004** Add end-to-end tests for scheduler lag, overload recovery, and memory ceilings.
