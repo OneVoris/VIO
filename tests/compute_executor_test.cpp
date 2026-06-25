@@ -2,8 +2,31 @@
 
 #include "test_assert.hpp"
 
+#include <type_traits>
+#include <utility>
+
 int main() {
     using namespace voris::io;
+
+    static_assert(!std::is_copy_constructible_v<compute_executor>);
+    static_assert(!std::is_copy_assignable_v<compute_executor>);
+    static_assert(!std::is_move_constructible_v<compute_executor>);
+    static_assert(!std::is_move_assignable_v<compute_executor>);
+
+    {
+        compute_executor executor(1);
+        bool saw_executor_scheduler = false;
+        assert(executor
+                   .submit([&] {
+                       auto current = require_current_scheduler();
+                       assert(current.has_value());
+                       assert(current->identity() == &executor);
+                       saw_executor_scheduler = true;
+                   })
+                   .has_value());
+        assert(executor.run_until_idle() == 1);
+        assert(saw_executor_scheduler);
+    }
 
     {
         compute_executor executor(1);
@@ -22,25 +45,96 @@ int main() {
 
     {
         compute_executor executor(1);
-        assert(executor.submit([] {}).has_value());
+        int ran = 0;
+        assert(executor.submit([&ran] { ++ran; }).has_value());
         for (int attempt = 0; attempt != 4; ++attempt) {
-            auto wait = executor.try_register_capacity_waiter();
-            assert(!wait.has_value());
-            assert(wait.error().classification == vio_error_code::resource_exhausted);
+            auto reservation = executor.try_reserve_capacity();
+            assert(!reservation.has_value());
+            assert(reservation.error().classification == vio_error_code::resource_exhausted);
             assert(executor.capacity_waiters() <= 1);
         }
         assert(executor.capacity_waiters() == 1);
-        executor.release_capacity_waiter();
+        assert(executor.run_until_idle() == 1);
+        assert(ran == 1);
         assert(executor.capacity_waiters() == 0);
 
-        auto wait = executor.try_register_capacity_waiter();
-        assert(!wait.has_value());
-        assert(wait.error().classification == vio_error_code::resource_exhausted);
+        auto reservation = executor.try_reserve_capacity();
+        assert(reservation.has_value());
+        auto stolen = executor.submit([&ran] { ran += 100; });
+        assert(!stolen.has_value());
+        assert(stolen.error().classification == vio_error_code::resource_exhausted);
         assert(executor.capacity_waiters() == 1);
+        assert(executor.queued() == 0);
+        assert(executor.submit_reserved(std::move(*reservation), [&ran] { ran += 10; })
+                   .has_value());
+        assert(executor.capacity_waiters() == 0);
         assert(executor.run_until_idle() == 1);
+        assert(ran == 11);
+    }
+
+    {
+        compute_executor executor(1);
+        {
+            auto reservation = executor.try_reserve_capacity();
+            assert(reservation.has_value());
+            auto blocked = executor.submit([] {});
+            assert(!blocked.has_value());
+            assert(blocked.error().classification == vio_error_code::resource_exhausted);
+        }
+        assert(executor.submit([] {}).has_value());
+        assert(executor.run_until_idle() == 1);
+
+        auto reservation = executor.try_reserve_capacity();
+        assert(reservation.has_value());
+        reservation->release();
+        assert(executor.submit([] {}).has_value());
+        assert(executor.run_until_idle() == 1);
+    }
+
+    {
+        compute_executor executor(0);
+        auto rejected = executor.submit([] {});
+        assert(!rejected.has_value());
+        assert(rejected.error().classification == vio_error_code::resource_exhausted);
+        for (int attempt = 0; attempt != 4; ++attempt) {
+            auto reservation = executor.try_reserve_capacity();
+            assert(!reservation.has_value());
+            assert(reservation.error().classification == vio_error_code::resource_exhausted);
+            assert(executor.capacity_waiters() <= 1);
+        }
+        assert(executor.capacity_waiters() == 1);
+        assert(executor.queued() == 0);
+        assert(executor.run_until_idle() == 0);
+    }
+
+    {
+        compute_executor executor(1);
+        auto reservation = executor.try_reserve_capacity();
+        assert(reservation.has_value());
+        executor.request_shutdown();
         assert(executor.capacity_waiters() == 0);
-        assert(executor.try_register_capacity_waiter().has_value());
+        auto rejected_submit = executor.submit([] {});
+        assert(!rejected_submit.has_value());
+        assert(rejected_submit.error().classification == vio_error_code::closed);
+        auto rejected_reservation = executor.try_reserve_capacity();
+        assert(!rejected_reservation.has_value());
+        assert(rejected_reservation.error().classification == vio_error_code::closed);
+        auto rejected_reserved = executor.submit_reserved(std::move(*reservation), [] {});
+        assert(!rejected_reserved.has_value());
+        assert(rejected_reserved.error().classification == vio_error_code::closed);
         assert(executor.capacity_waiters() == 0);
+    }
+
+    {
+        compute_executor owner(1);
+        compute_executor other(1);
+        auto reservation = owner.try_reserve_capacity();
+        assert(reservation.has_value());
+        auto wrong_owner = other.submit_reserved(std::move(*reservation), [] {});
+        assert(!wrong_owner.has_value());
+        assert(wrong_owner.error().classification == vio_error_code::invalid_state);
+        assert(owner.submit([] {}).has_value());
+        assert(owner.run_until_idle() == 1);
     }
 
     {
@@ -73,14 +167,14 @@ int main() {
     {
         compute_executor executor(1);
         assert(executor.submit([] {}).has_value());
-        auto wait = executor.try_register_capacity_waiter();
-        assert(!wait.has_value());
+        auto reservation = executor.try_reserve_capacity();
+        assert(!reservation.has_value());
         assert(executor.capacity_waiters() == 1);
         executor.request_shutdown();
         assert(executor.capacity_waiters() == 0);
-        auto rejected_wait = executor.try_register_capacity_waiter();
-        assert(!rejected_wait.has_value());
-        assert(rejected_wait.error().classification == vio_error_code::closed);
+        auto rejected_reservation = executor.try_reserve_capacity();
+        assert(!rejected_reservation.has_value());
+        assert(rejected_reservation.error().classification == vio_error_code::closed);
         assert(executor.capacity_waiters() == 0);
     }
 
