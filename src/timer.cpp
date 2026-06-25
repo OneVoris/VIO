@@ -1,5 +1,7 @@
 #include <voris/io/timer.hpp>
 
+#include <voris/io/loop_budget.hpp>
+
 #include <atomic>
 #include <utility>
 
@@ -44,6 +46,56 @@ bool timer_heap::entry_less(const entry& lhs, const entry& rhs) noexcept {
         return false;
     }
     return lhs.id < rhs.id;
+}
+
+timer_heap::ready_batch_plan timer_heap::plan_ready_batches(time_point now,
+                                                            std::size_t max_batches) const noexcept {
+    ready_batch_plan plan{0, 0};
+    if (max_batches == 0 || entries_.empty() || now < entries_.front().deadline) {
+        return plan;
+    }
+
+    auto deadline = entries_.front().deadline;
+    while (plan.batch_count < max_batches) {
+        const auto batch_size = current_deadline_batch_size(deadline);
+        if (batch_size == 0) {
+            break;
+        }
+
+        plan.timer_count += batch_size;
+        ++plan.batch_count;
+
+        const auto next_deadline = next_ready_deadline_after(deadline, now);
+        if (!next_deadline.has_value()) {
+            break;
+        }
+        deadline = *next_deadline;
+    }
+
+    return plan;
+}
+
+std::size_t timer_heap::current_deadline_batch_size(time_point deadline) const noexcept {
+    std::size_t count = 0;
+    for (const auto& entry : entries_) {
+        if (entry.deadline == deadline) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::optional<timer_heap::time_point> timer_heap::next_ready_deadline_after(
+    time_point deadline,
+    time_point now) const noexcept {
+    std::optional<time_point> next_deadline;
+    for (const auto& entry : entries_) {
+        if (deadline < entry.deadline && entry.deadline <= now &&
+            (!next_deadline.has_value() || entry.deadline < *next_deadline)) {
+            next_deadline = entry.deadline;
+        }
+    }
+    return next_deadline;
 }
 
 void timer_heap::swap_entries(std::size_t lhs, std::size_t rhs) noexcept {
@@ -154,8 +206,10 @@ bool timer_heap::cancel(timer_handle handle) noexcept {
 
 std::vector<timer_handle> timer_heap::pop_ready(time_point now) {
     std::vector<timer_handle> ready;
+    const auto plan = plan_ready_batches(now, entries_.size());
+    ready.reserve(plan.timer_count);
 
-    while (!entries_.empty() && entries_.front().deadline <= now) {
+    for (std::size_t batch_index = 0; batch_index < plan.batch_count; ++batch_index) {
         pop_deadline_batch(entries_.front().deadline, ready);
     }
     return ready;
@@ -163,8 +217,10 @@ std::vector<timer_handle> timer_heap::pop_ready(time_point now) {
 
 std::vector<timer_handle> timer_heap::pop_ready(time_point now, loop_budget_slice& budget) {
     std::vector<timer_handle> ready;
+    const auto plan = plan_ready_batches(now, budget.remaining_timers());
+    ready.reserve(plan.timer_count);
 
-    while (!entries_.empty() && entries_.front().deadline <= now) {
+    for (std::size_t batch_index = 0; batch_index < plan.batch_count; ++batch_index) {
         if (!budget.consume_timer()) {
             break;
         }

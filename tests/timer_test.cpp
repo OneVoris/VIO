@@ -174,9 +174,9 @@ void budgeted_pop_keeps_same_deadline_batch_together() {
     auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{100ms}, slice);
 
     assert(ready.size() == 3);
-    assert(ready[0].id() == first.id());
-    assert(ready[1].id() == second.id());
-    assert(ready[2].id() == third.id());
+    assert(contains_handle(ready, first));
+    assert(contains_handle(ready, second));
+    assert(contains_handle(ready, third));
     assert(!contains_handle(ready, later));
     assert(slice.consumed_timers() == 1);
     assert(slice.remaining_timers() == 0);

@@ -6,11 +6,12 @@
 #include <unordered_map>
 #include <vector>
 
-#include <voris/io/loop_budget.hpp>
 #include <voris/io/task.hpp>
 #include <voris/io/virtual_clock.hpp>
 
 namespace voris::io {
+
+class loop_budget_slice;
 
 class timer_handle {
 public:
@@ -58,8 +59,19 @@ private:
         std::size_t id;
     };
 
+    struct ready_batch_plan {
+        std::size_t batch_count;
+        std::size_t timer_count;
+    };
+
     [[nodiscard]] static std::size_t allocate_owner_id() noexcept;
     [[nodiscard]] static bool entry_less(const entry& lhs, const entry& rhs) noexcept;
+    [[nodiscard]] ready_batch_plan plan_ready_batches(time_point now,
+                                                      std::size_t max_batches) const noexcept;
+    [[nodiscard]] std::size_t current_deadline_batch_size(time_point deadline) const noexcept;
+    [[nodiscard]] std::optional<time_point> next_ready_deadline_after(
+        time_point deadline,
+        time_point now) const noexcept;
     void swap_entries(std::size_t lhs, std::size_t rhs) noexcept;
     void sift_up(std::size_t index) noexcept;
     void sift_down(std::size_t index) noexcept;
