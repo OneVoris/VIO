@@ -146,6 +146,8 @@ void test_shutdown_defines_later_behavior() {
     assert_void_error(backend.submit(voris::io::backend_operation{
                           1, voris::io::backend_operation_kind::read, {}}),
                       voris::io::vio_error_code::closed);
+    assert_void_error(backend.cancel(1, voris::io::cancellation_reason::manual),
+                      voris::io::vio_error_code::closed);
     assert_void_error(backend.wake(), voris::io::vio_error_code::closed);
 
     auto polled = backend.poll();
