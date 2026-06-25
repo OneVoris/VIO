@@ -270,6 +270,31 @@ inline kqueue_socket_pair make_kqueue_socket_pair() {
     return kqueue_socket_pair{kqueue_unique_fd{sockets[0]}, kqueue_unique_fd{sockets[1]}};
 }
 
+inline void move_away_from_fd_number(int target_fd, kqueue_unique_fd& fd) {
+    if (fd.get() != target_fd) {
+        return;
+    }
+
+    const int duplicate = ::dup(fd.get());
+    assert(duplicate >= 0);
+    fd.reset(duplicate);
+}
+
+inline void make_kqueue_same_number_fd(int target_fd,
+                                       kqueue_unique_fd& fd,
+                                       kqueue_unique_fd& peer) {
+    if (fd.get() == target_fd) {
+        return;
+    }
+
+    move_away_from_fd_number(target_fd, peer);
+
+    const int duplicate = ::dup2(fd.get(), target_fd);
+    assert(duplicate == target_fd);
+    fd.reset();
+    fd.reset(duplicate);
+}
+
 class kqueue_contract_fixture {
 public:
     [[nodiscard]] std::size_t make_native_handle() {
@@ -287,12 +312,7 @@ public:
 
         auto replacement = make_kqueue_socket_pair();
         const auto target = static_cast<int>(native_handle);
-        if (replacement.first.get() != target) {
-            const int duplicate = ::dup2(replacement.first.get(), target);
-            assert(duplicate == target);
-            replacement.first.reset();
-            replacement.first.reset(duplicate);
-        }
+        make_kqueue_same_number_fd(target, replacement.first, replacement.second);
 
         handles_.push_back(std::move(replacement));
         return native_handle;

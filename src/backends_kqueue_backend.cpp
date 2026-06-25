@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <climits>
 #include <cstdint>
+#include <fcntl.h>
 #include <limits>
 #include <sys/event.h>
 #include <sys/time.h>
@@ -59,24 +60,6 @@ constexpr std::uintptr_t token_low_mask =
     };
 }
 
-#if defined(__NetBSD__)
-[[nodiscard]] intptr_t cookie_to_udata(std::uintptr_t cookie) noexcept {
-    return static_cast<intptr_t>(cookie);
-}
-
-[[nodiscard]] std::uintptr_t cookie_from_udata(const struct kevent& event) noexcept {
-    return static_cast<std::uintptr_t>(event.udata);
-}
-#else
-[[nodiscard]] void* cookie_to_udata(std::uintptr_t cookie) noexcept {
-    return reinterpret_cast<void*>(cookie);
-}
-
-[[nodiscard]] std::uintptr_t cookie_from_udata(const struct kevent& event) noexcept {
-    return reinterpret_cast<std::uintptr_t>(event.udata);
-}
-#endif
-
 void set_event(struct kevent& event,
                std::uintptr_t ident,
                int16_t filter,
@@ -84,28 +67,73 @@ void set_event(struct kevent& event,
                uint32_t fflags,
                intptr_t data,
                std::uintptr_t cookie) noexcept {
-    EV_SET(&event, ident, filter, flags, fflags, data, cookie_to_udata(cookie));
+    EV_SET(&event, ident, filter, flags, fflags, data,
+           detail::kqueue_cookie_to_udata<struct kevent>(cookie));
 }
 
-[[nodiscard]] void_result apply_filter_change(int kqueue_fd, struct kevent& change) {
-    if (::kevent(kqueue_fd, &change, 1, nullptr, 0, nullptr) == 0) {
+enum class change_error_policy {
+    strict,
+    cleanup,
+};
+
+[[nodiscard]] void_result receipt_error(int provider_code,
+                                        change_error_policy policy) {
+    if (policy == change_error_policy::cleanup &&
+        (provider_code == EBADF || provider_code == ENOENT)) {
         return {};
     }
-    return std::unexpected(provider_failure(errno));
+    return std::unexpected(provider_failure(provider_code));
+}
+
+[[nodiscard]] void_result apply_filter_change(int kqueue_fd,
+                                              struct kevent change,
+                                              change_error_policy policy) {
+    change.flags |= EV_RECEIPT;
+
+    for (;;) {
+        struct kevent receipt{};
+        const int received = ::kevent(kqueue_fd, &change, 1, &receipt, 1, nullptr);
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return receipt_error(errno, policy);
+        }
+        if (received != 1 || (receipt.flags & EV_ERROR) == 0) {
+            return std::unexpected(make_error(
+                vio_error_code::backend_failure,
+                "kqueue did not return a filter-change receipt"));
+        }
+        if (receipt.data == 0) {
+            return {};
+        }
+        return receipt_error(static_cast<int>(receipt.data), policy);
+    }
+}
+
+[[nodiscard]] void_result set_close_on_exec(int fd) {
+    int flags = -1;
+    do {
+        flags = ::fcntl(fd, F_GETFD);
+    } while (flags < 0 && errno == EINTR);
+    if (flags < 0) {
+        return std::unexpected(provider_failure(errno));
+    }
+
+    int result = -1;
+    do {
+        result = ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0) {
+        return std::unexpected(provider_failure(errno));
+    }
+    return {};
 }
 
 [[nodiscard]] void_result delete_filter(int kqueue_fd, std::uintptr_t ident, int16_t filter) {
     struct kevent change{};
     set_event(change, ident, filter, EV_DELETE, 0, 0, 0);
-    if (::kevent(kqueue_fd, &change, 1, nullptr, 0, nullptr) == 0) {
-        return {};
-    }
-
-    const int provider_code = errno;
-    if (provider_code == EBADF || provider_code == ENOENT) {
-        return {};
-    }
-    return std::unexpected(provider_failure(provider_code));
+    return apply_filter_change(kqueue_fd, change, change_error_policy::cleanup);
 }
 
 [[nodiscard]] bool is_read_readiness(const struct kevent& event) noexcept {
@@ -130,12 +158,19 @@ kqueue_backend::kqueue_backend() {
         initialization_error_ = provider_failure(errno);
         return;
     }
+    if (auto cloexec = set_close_on_exec(kqueue_fd_); !cloexec.has_value()) {
+        initialization_error_ = cloexec.error();
+        close_owned_descriptor();
+        return;
+    }
 
     struct kevent wake_event{};
     set_event(wake_event, wake_event_ident, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0,
               wake_event_cookie);
-    if (::kevent(kqueue_fd_, &wake_event, 1, nullptr, 0, nullptr) != 0) {
-        initialization_error_ = provider_failure(errno);
+    if (auto registered_wake =
+            apply_filter_change(kqueue_fd_, wake_event, change_error_policy::strict);
+        !registered_wake.has_value()) {
+        initialization_error_ = registered_wake.error();
         close_owned_descriptor();
     }
 #endif
@@ -191,7 +226,8 @@ io_result<backend_handle_token> kqueue_backend::register_handle(std::size_t nati
     const auto ident = static_cast<std::uintptr_t>(native_handle);
     struct kevent read_event{};
     set_event(read_event, ident, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, *cookie);
-    if (auto registered_read = apply_filter_change(kqueue_fd_, read_event);
+    if (auto registered_read =
+            apply_filter_change(kqueue_fd_, read_event, change_error_policy::strict);
         !registered_read.has_value()) {
         (void)fallback_.close_handle(*token);
         return std::unexpected(registered_read.error());
@@ -199,7 +235,8 @@ io_result<backend_handle_token> kqueue_backend::register_handle(std::size_t nati
 
     struct kevent write_event{};
     set_event(write_event, ident, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, *cookie);
-    if (auto registered_write = apply_filter_change(kqueue_fd_, write_event);
+    if (auto registered_write =
+            apply_filter_change(kqueue_fd_, write_event, change_error_policy::strict);
         !registered_write.has_value()) {
         (void)delete_filter(kqueue_fd_, ident, EVFILT_READ);
         (void)fallback_.close_handle(*token);
@@ -312,7 +349,7 @@ io_result<std::size_t> kqueue_backend::poll() {
             return std::unexpected(provider_failure(static_cast<int>(event.data)));
         }
 
-        const auto token = unpack_event_cookie(cookie_from_udata(event));
+        const auto token = unpack_event_cookie(detail::kqueue_cookie_from_udata(event));
         if (!fallback_.is_current_handle(token)) {
             continue;
         }

@@ -1,10 +1,45 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
+#include <type_traits>
+#include <utility>
 
 #include <voris/io/backend.hpp>
 
 namespace voris::io::backends {
+
+namespace detail {
+
+template <class Event>
+using kqueue_udata_t = decltype(std::declval<Event&>().udata);
+
+template <class Event>
+[[nodiscard]] auto kqueue_cookie_to_udata(std::uintptr_t cookie) noexcept
+    -> kqueue_udata_t<Event> {
+    using udata_type = std::remove_cv_t<kqueue_udata_t<Event>>;
+    if constexpr (std::is_pointer_v<udata_type>) {
+        return reinterpret_cast<kqueue_udata_t<Event>>(cookie);
+    } else {
+        static_assert(std::is_integral_v<udata_type>,
+                      "kqueue udata must be pointer or integral");
+        return static_cast<kqueue_udata_t<Event>>(cookie);
+    }
+}
+
+template <class Event>
+[[nodiscard]] std::uintptr_t kqueue_cookie_from_udata(const Event& event) noexcept {
+    using udata_type = std::remove_cv_t<kqueue_udata_t<Event>>;
+    if constexpr (std::is_pointer_v<udata_type>) {
+        return reinterpret_cast<std::uintptr_t>(event.udata);
+    } else {
+        static_assert(std::is_integral_v<udata_type>,
+                      "kqueue udata must be pointer or integral");
+        return static_cast<std::uintptr_t>(event.udata);
+    }
+}
+
+} // namespace detail
 
 class kqueue_backend final : public backend {
 public:

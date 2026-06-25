@@ -1,6 +1,7 @@
 #include <voris/io/backends/kqueue_backend.hpp>
 
 #include <array>
+#include <cstdint>
 #include <limits>
 #include <type_traits>
 
@@ -14,6 +15,14 @@
 #endif
 
 namespace {
+
+struct pointer_udata_event {
+    void* udata{};
+};
+
+struct integral_udata_event {
+    std::intptr_t udata{};
+};
 
 voris::io::backend_operation operation(std::size_t id,
                                        voris::io::backend_handle_token token) {
@@ -136,10 +145,22 @@ void assert_provider_error(const voris::io::io_result<voris::io::backend_handle_
     assert(*result.error().provider_code == expected_errno);
 }
 
-void make_same_number_fd(int target_fd, unique_fd& fd) {
+void move_away_from_fd_number(int target_fd, unique_fd& fd) {
+    if (fd.get() != target_fd) {
+        return;
+    }
+
+    const int duplicate = ::dup(fd.get());
+    assert(duplicate >= 0);
+    fd.reset(duplicate);
+}
+
+void make_same_number_fd(int target_fd, unique_fd& fd, unique_fd& peer) {
     if (fd.get() == target_fd) {
         return;
     }
+
+    move_away_from_fd_number(target_fd, peer);
 
     const int duplicate = ::dup2(fd.get(), target_fd);
     assert(duplicate == target_fd);
@@ -181,7 +202,30 @@ void test_register_validates_and_reports_provider_errors() {
     assert(::close(closed_fd) == 0);
     assert_provider_error(backend.register_handle(static_cast<std::size_t>(closed_fd)), EBADF);
 
+    unique_fd replacement_first;
+    unique_fd replacement_second;
+    make_socket_pair(replacement_first, replacement_second);
+    make_same_number_fd(closed_fd, replacement_first, replacement_second);
+
+    auto replacement_token =
+        require_token(backend.register_handle(static_cast<std::size_t>(replacement_first.get())));
+    assert(replacement_token.native_handle == static_cast<std::size_t>(closed_fd));
+    assert(backend.close_handle(replacement_token).has_value());
+
     assert(backend.shutdown().has_value());
+}
+
+void test_same_number_fd_helper_never_aliases_peer() {
+    unique_fd first;
+    unique_fd second;
+    make_socket_pair(first, second);
+
+    const int peer_fd = second.get();
+    make_same_number_fd(peer_fd, first, second);
+
+    assert(first.get() == peer_fd);
+    assert(second.get() != peer_fd);
+    assert(second.get() >= 0);
 }
 
 void test_close_deregisters_without_taking_ownership() {
@@ -323,7 +367,7 @@ void test_same_numeric_fd_reuse_uses_new_generation() {
     unique_fd new_first;
     unique_fd new_second;
     make_socket_pair(new_first, new_second);
-    make_same_number_fd(reused_number, new_first);
+    make_same_number_fd(reused_number, new_first, new_second);
 
     auto new_token =
         require_token(backend.register_handle(static_cast<std::size_t>(new_first.get())));
@@ -385,6 +429,14 @@ void test_shutdown_defines_later_behavior() {
 int main() {
     using namespace voris::io;
 
+    static_assert(std::is_same_v<
+                  decltype(backends::detail::kqueue_cookie_to_udata<pointer_udata_event>(1U)),
+                  void*>);
+    static_assert(std::is_same_v<
+                  decltype(backends::detail::kqueue_cookie_to_udata<integral_udata_event>(1U)),
+                  std::intptr_t>);
+    assert(backends::detail::kqueue_cookie_from_udata(integral_udata_event{7}) == 7U);
+
     static_assert(!std::is_copy_constructible_v<backends::kqueue_backend>);
     static_assert(!std::is_copy_assignable_v<backends::kqueue_backend>);
 
@@ -395,6 +447,7 @@ int main() {
     test_register_validates_and_reports_provider_errors();
     test_close_deregisters_without_taking_ownership();
     test_close_after_external_fd_close_still_completes_pending_operation();
+    test_same_number_fd_helper_never_aliases_peer();
     test_readiness_mask_completes_only_compatible_operation_kind();
     test_submit_rejects_file_operations_for_readiness_backend();
     test_same_numeric_fd_reuse_uses_new_generation();
