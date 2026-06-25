@@ -1,8 +1,12 @@
 #include <voris/io/backends/io_uring_backend.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <utility>
+#include <vector>
 
 #if defined(__linux__) && __has_include(<linux/io_uring.h>)
 #include <linux/io_uring.h>
@@ -119,9 +123,37 @@ void apply_probe(io_uring_capabilities& capabilities,
     return make_error(vio_error_code::unsupported, "io_uring is unavailable");
 }
 
+[[nodiscard]] vio_error closed_error() {
+    return make_error(vio_error_code::closed);
+}
+
+[[nodiscard]] vio_error invalid_state_error(std::string diagnostic) {
+    return make_error(vio_error_code::invalid_state, std::move(diagnostic));
+}
+
 [[nodiscard]] vio_error opcode_unavailable_error() {
     return make_error(vio_error_code::unsupported,
                       "io_uring operation opcode is unavailable");
+}
+
+[[nodiscard]] vio_error submission_queue_full_error() {
+    return make_error(vio_error_code::resource_exhausted,
+                      "io_uring submission queue is full");
+}
+
+[[nodiscard]] void_result closed_completion() {
+    return std::unexpected(make_error(vio_error_code::closed));
+}
+
+[[nodiscard]] io_uring_backend_options normalize_options(
+    io_uring_backend_options options) noexcept {
+    if (options.submit_batch_limit == 0) {
+        options.submit_batch_limit = 1;
+    }
+    if (options.completion_batch_limit == 0) {
+        options.completion_batch_limit = 1;
+    }
+    return options;
 }
 
 } // namespace
@@ -183,11 +215,22 @@ io_uring_capabilities detect_io_uring_capabilities() noexcept {
 #endif
 }
 
-io_uring_backend::io_uring_backend(io_uring_capabilities capabilities)
-    : capabilities_(capabilities) {}
+io_uring_backend::io_uring_backend(io_uring_capabilities capabilities,
+                                   io_uring_backend_options options)
+    : capabilities_(capabilities), options_(normalize_options(options)) {}
 
 const io_uring_capabilities& io_uring_backend::capabilities() const noexcept {
     return capabilities_;
+}
+
+io_uring_backend_state io_uring_backend::state() const noexcept {
+    if (closed_) {
+        return io_uring_backend_state::closed;
+    }
+    if (!capabilities_.available) {
+        return io_uring_backend_state::unavailable;
+    }
+    return io_uring_backend_state::active;
 }
 
 bool io_uring_backend::default_eligible() const noexcept {
@@ -198,6 +241,9 @@ bool io_uring_backend::default_eligible() const noexcept {
 }
 
 io_result<backend_handle_token> io_uring_backend::register_handle(std::size_t native_handle) {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
@@ -205,16 +251,38 @@ io_result<backend_handle_token> io_uring_backend::register_handle(std::size_t na
 }
 
 void_result io_uring_backend::submit(backend_operation operation) {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
     if (!supports_operation_kind(capabilities_, operation.kind)) {
         return std::unexpected(opcode_unavailable_error());
     }
-    return fallback_.submit(operation);
+    if (operation.id == 0) {
+        return std::unexpected(invalid_state_error("operation id must be non-zero"));
+    }
+    if (!fallback_.is_current_handle(operation.handle)) {
+        return std::unexpected(
+            invalid_state_error("operation handle token is not current"));
+    }
+    if (active_operation_ids_.contains(operation.id)) {
+        return std::unexpected(invalid_state_error("operation id is already active"));
+    }
+    if (submission_queue_.size() >= options_.submission_queue_capacity) {
+        return std::unexpected(submission_queue_full_error());
+    }
+
+    active_operation_ids_.insert(operation.id);
+    submission_queue_.push_back(operation);
+    return {};
 }
 
 void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reason reason) {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
@@ -226,28 +294,58 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
 }
 
 void_result io_uring_backend::close_handle(backend_handle_token token) {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
+    }
+    if (!fallback_.is_current_handle(token)) {
+        return std::unexpected(invalid_state_error("backend handle token is not current"));
+    }
+    if (auto flushed = flush_queued_submissions_for(token); !flushed.has_value()) {
+        return flushed;
     }
     return fallback_.close_handle(token);
 }
 
 io_result<std::size_t> io_uring_backend::poll() {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
-    return fallback_.poll();
+    auto flushed = flush_submission_batch();
+    if (!flushed.has_value()) {
+        return std::unexpected(flushed.error());
+    }
+    return observe_completion_batch();
 }
 
 io_result<std::size_t> io_uring_backend::drain_completions(
     std::span<backend_completion> out) {
-    if (!capabilities_.available) {
+    if (out.empty()) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "completion drain output must not be empty"));
+    }
+    if (!closed_ && !capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
-    return fallback_.drain_completions(out);
+
+    const auto count = std::min(out.size(), completion_queue_.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        active_operation_ids_.erase(completion_queue_.front().operation_id);
+        out[index] = std::move(completion_queue_.front());
+        completion_queue_.pop_front();
+    }
+    return count;
 }
 
 void_result io_uring_backend::wake() {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
@@ -255,10 +353,31 @@ void_result io_uring_backend::wake() {
 }
 
 void_result io_uring_backend::shutdown() {
-    return fallback_.shutdown();
+    if (closed_) {
+        return {};
+    }
+
+    closed_ = true;
+    if (auto stopped = fallback_.shutdown(); !stopped.has_value()) {
+        return stopped;
+    }
+    if (auto drained = drain_fallback_completions(); !drained.has_value()) {
+        return drained;
+    }
+
+    while (!submission_queue_.empty()) {
+        completion_queue_.push_back(
+            backend_completion{submission_queue_.front().id, closed_completion()});
+        submission_queue_.pop_front();
+    }
+
+    return {};
 }
 
 void_result io_uring_backend::register_buffers(std::size_t count) {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
     if (!capabilities_.available || !capabilities_.supports_registered_buffers) {
         return std::unexpected(make_error(vio_error_code::unsupported,
                                           "registered buffers unavailable"));
@@ -268,11 +387,89 @@ void_result io_uring_backend::register_buffers(std::size_t count) {
 }
 
 void_result io_uring_backend::register_files(std::size_t count) {
+    if (closed_) {
+        return std::unexpected(closed_error());
+    }
     if (!capabilities_.available || !capabilities_.supports_registered_files) {
         return std::unexpected(make_error(vio_error_code::unsupported,
                                           "registered files unavailable"));
     }
     registered_files_ = count;
+    return {};
+}
+
+io_result<std::size_t> io_uring_backend::flush_submission_batch() {
+    const auto count = std::min(options_.submit_batch_limit, submission_queue_.size());
+    std::size_t flushed = 0;
+    for (; flushed < count; ++flushed) {
+        auto operation = submission_queue_.front();
+        submission_queue_.pop_front();
+
+        auto submitted = fallback_.submit(operation);
+        if (!submitted.has_value()) {
+            active_operation_ids_.erase(operation.id);
+            return std::unexpected(submitted.error());
+        }
+    }
+    return flushed;
+}
+
+io_result<std::size_t> io_uring_backend::observe_completion_batch() {
+    auto available = fallback_.poll();
+    if (!available.has_value()) {
+        return std::unexpected(available.error());
+    }
+
+    const auto count = std::min(*available, options_.completion_batch_limit);
+    if (count == 0) {
+        return 0U;
+    }
+
+    std::vector<backend_completion> batch(count);
+    auto drained = fallback_.drain_completions(
+        std::span<backend_completion>{batch.data(), batch.size()});
+    if (!drained.has_value()) {
+        return std::unexpected(drained.error());
+    }
+
+    for (std::size_t index = 0; index < *drained; ++index) {
+        completion_queue_.push_back(std::move(batch[index]));
+    }
+    return *drained;
+}
+
+void_result io_uring_backend::drain_fallback_completions() {
+    std::array<backend_completion, 32> batch{};
+    for (;;) {
+        auto drained = fallback_.drain_completions(
+            std::span<backend_completion>{batch.data(), batch.size()});
+        if (!drained.has_value()) {
+            return std::unexpected(drained.error());
+        }
+        if (*drained == 0) {
+            return {};
+        }
+        for (std::size_t index = 0; index < *drained; ++index) {
+            completion_queue_.push_back(std::move(batch[index]));
+        }
+    }
+}
+
+void_result io_uring_backend::flush_queued_submissions_for(backend_handle_token token) {
+    for (auto iterator = submission_queue_.begin(); iterator != submission_queue_.end();) {
+        if (iterator->handle == token) {
+            const auto operation = *iterator;
+            iterator = submission_queue_.erase(iterator);
+
+            auto submitted = fallback_.submit(operation);
+            if (!submitted.has_value()) {
+                active_operation_ids_.erase(operation.id);
+                return submitted;
+            }
+            continue;
+        }
+        ++iterator;
+    }
     return {};
 }
 

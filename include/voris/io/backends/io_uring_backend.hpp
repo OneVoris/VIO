@@ -1,7 +1,8 @@
 #pragma once
 
 #include <cstddef>
-#include <vector>
+#include <deque>
+#include <unordered_set>
 
 #include <voris/io/backend.hpp>
 
@@ -22,14 +23,28 @@ struct io_uring_capabilities {
     bool supports_registered_files{};
 };
 
+struct io_uring_backend_options {
+    std::size_t submission_queue_capacity{64};
+    std::size_t submit_batch_limit{32};
+    std::size_t completion_batch_limit{32};
+};
+
+enum class io_uring_backend_state {
+    unavailable,
+    active,
+    closed,
+};
+
 [[nodiscard]] io_uring_capabilities detect_io_uring_capabilities() noexcept;
 
 class io_uring_backend final : public backend {
 public:
     explicit io_uring_backend(io_uring_capabilities capabilities =
-                                  detect_io_uring_capabilities());
+                                  detect_io_uring_capabilities(),
+                              io_uring_backend_options options = {});
 
     [[nodiscard]] const io_uring_capabilities& capabilities() const noexcept;
+    [[nodiscard]] io_uring_backend_state state() const noexcept;
     [[nodiscard]] bool default_eligible() const noexcept;
 
     [[nodiscard]] io_result<backend_handle_token> register_handle(
@@ -48,10 +63,20 @@ public:
     [[nodiscard]] void_result register_files(std::size_t count);
 
 private:
+    [[nodiscard]] io_result<std::size_t> flush_submission_batch();
+    [[nodiscard]] io_result<std::size_t> observe_completion_batch();
+    [[nodiscard]] void_result drain_fallback_completions();
+    [[nodiscard]] void_result flush_queued_submissions_for(backend_handle_token token);
+
     io_uring_capabilities capabilities_;
+    io_uring_backend_options options_;
     virtual_backend fallback_;
+    std::deque<backend_operation> submission_queue_{};
+    std::deque<backend_completion> completion_queue_{};
+    std::unordered_set<std::size_t> active_operation_ids_{};
     std::size_t registered_buffers_{0};
     std::size_t registered_files_{0};
+    bool closed_{false};
 };
 
 } // namespace voris::io::backends

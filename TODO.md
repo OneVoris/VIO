@@ -75,7 +75,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 ## M6 — io_uring Backend
 
 - [x] **VIO-M6-001** Detect kernel features and opcodes and build a capability set.
-- [ ] **VIO-M6-002** Implement submission/completion queue lifecycle and batched submit/poll.
+- [x] **VIO-M6-002** Implement submission/completion queue lifecycle and batched submit/poll.
 - [ ] **VIO-M6-003** Implement socket read, write, accept, and connect operations.
 - [ ] **VIO-M6-004** Implement file read, write, and `fsync` operations.
 - [ ] **VIO-M6-005** Implement asynchronous cancellation and verify completion races.

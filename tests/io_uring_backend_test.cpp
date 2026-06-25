@@ -42,10 +42,31 @@ void assert_void_unsupported(const voris::io::void_result& result) {
     assert(result.error().classification == voris::io::vio_error_code::unsupported);
 }
 
+void assert_void_error(const voris::io::void_result& result,
+                       voris::io::vio_error_code expected) {
+    assert(!result.has_value());
+    assert(result.error().classification == expected);
+}
+
 template <class T>
 void assert_io_unsupported(const voris::io::io_result<T>& result) {
     assert(!result.has_value());
     assert(result.error().classification == voris::io::vio_error_code::unsupported);
+}
+
+template <class T>
+void assert_io_error(const voris::io::io_result<T>& result,
+                     voris::io::vio_error_code expected) {
+    assert(!result.has_value());
+    assert(result.error().classification == expected);
+}
+
+void assert_completion_error(const voris::io::backend_completion& completion,
+                             std::size_t operation_id,
+                             voris::io::vio_error_code expected) {
+    assert(completion.operation_id == operation_id);
+    assert(!completion.result.has_value());
+    assert(completion.result.error().classification == expected);
 }
 
 voris::io::backends::io_uring_capabilities core_capabilities() {
@@ -313,6 +334,240 @@ void test_optional_registrations_follow_capabilities() {
     }
 }
 
+void test_lifecycle_state_tracks_availability_and_shutdown() {
+    {
+        auto caps = core_capabilities();
+        caps.available = false;
+
+        voris::io::backends::io_uring_backend backend(caps);
+        assert(backend.state() == voris::io::backends::io_uring_backend_state::unavailable);
+        assert_io_unsupported(backend.register_handle(1));
+        assert_io_unsupported(backend.poll());
+
+        std::array<voris::io::backend_completion, 1> completions{};
+        assert_io_unsupported(backend.drain_completions(completions));
+
+        assert(backend.shutdown().has_value());
+        assert(backend.state() == voris::io::backends::io_uring_backend_state::closed);
+        assert_io_error(backend.register_handle(1), voris::io::vio_error_code::closed);
+    }
+
+    {
+        voris::io::backends::io_uring_backend backend(core_capabilities());
+        assert(backend.state() == voris::io::backends::io_uring_backend_state::active);
+
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+
+        assert(backend.shutdown().has_value());
+        assert(backend.shutdown().has_value());
+        assert(backend.state() == voris::io::backends::io_uring_backend_state::closed);
+
+        assert_io_error(backend.register_handle(2), voris::io::vio_error_code::closed);
+        assert_void_error(backend.submit(operation(11, voris::io::backend_operation_kind::read,
+                                                   *token)),
+                          voris::io::vio_error_code::closed);
+        assert_void_error(backend.wake(), voris::io::vio_error_code::closed);
+        assert_io_error(backend.poll(), voris::io::vio_error_code::closed);
+        assert_void_error(backend.register_buffers(1), voris::io::vio_error_code::closed);
+
+        std::array<voris::io::backend_completion, 1> completions{};
+        const auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 0);
+    }
+}
+
+void test_empty_completion_drain_is_invalid_state() {
+    auto caps = core_capabilities();
+    caps.available = false;
+    voris::io::backends::io_uring_backend unavailable(caps);
+    assert_io_error(
+        unavailable.drain_completions(std::span<voris::io::backend_completion>{}),
+        voris::io::vio_error_code::invalid_state);
+
+    voris::io::backends::io_uring_backend backend(core_capabilities());
+    assert_io_error(backend.drain_completions(std::span<voris::io::backend_completion>{}),
+                    voris::io::vio_error_code::invalid_state);
+}
+
+void test_submit_validates_operation_before_queueing() {
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), voris::io::backends::io_uring_backend_options{
+                                 .submission_queue_capacity = 2,
+                                 .submit_batch_limit = 1,
+                                 .completion_batch_limit = 1,
+                             });
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    assert_void_error(backend.submit(operation(0, voris::io::backend_operation_kind::read,
+                                               *token)),
+                      voris::io::vio_error_code::invalid_state);
+    assert_void_error(backend.submit(operation(1, voris::io::backend_operation_kind::read,
+                                               {})),
+                      voris::io::vio_error_code::invalid_state);
+
+    assert(backend.submit(operation(1, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+    assert_void_error(backend.submit(operation(1, voris::io::backend_operation_kind::read,
+                                               *token)),
+                      voris::io::vio_error_code::invalid_state);
+    assert(backend.shutdown().has_value());
+}
+
+void test_submission_queue_is_bounded() {
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), voris::io::backends::io_uring_backend_options{
+                                 .submission_queue_capacity = 2,
+                                 .submit_batch_limit = 2,
+                                 .completion_batch_limit = 2,
+                             });
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    assert(backend.submit(operation(1, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+    assert(backend.submit(operation(2, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+    assert_void_error(backend.submit(operation(3, voris::io::backend_operation_kind::read,
+                                               *token)),
+                      voris::io::vio_error_code::resource_exhausted);
+    assert(backend.shutdown().has_value());
+}
+
+void test_poll_flushes_submissions_in_batches() {
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), voris::io::backends::io_uring_backend_options{
+                                 .submission_queue_capacity = 8,
+                                 .submit_batch_limit = 2,
+                                 .completion_batch_limit = 8,
+                             });
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    assert(backend.submit(operation(1, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+    assert(backend.submit(operation(2, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+    assert(backend.submit(operation(3, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+
+    std::array<voris::io::backend_completion, 4> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 0);
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(backend.cancel(1, voris::io::cancellation_reason::manual).has_value());
+    assert(backend.cancel(2, voris::io::cancellation_reason::manual).has_value());
+    assert_void_error(backend.cancel(3, voris::io::cancellation_reason::manual),
+                      voris::io::vio_error_code::invalid_state);
+
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(backend.cancel(3, voris::io::cancellation_reason::manual).has_value());
+    assert(backend.shutdown().has_value());
+}
+
+void test_poll_observes_completions_in_batches_and_drain_preserves_order() {
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), voris::io::backends::io_uring_backend_options{
+                                 .submission_queue_capacity = 8,
+                                 .submit_batch_limit = 8,
+                                 .completion_batch_limit = 2,
+                             });
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    assert(backend.submit(operation(1, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+    assert(backend.submit(operation(2, voris::io::backend_operation_kind::write, *token))
+               .has_value());
+    assert(backend.submit(operation(3, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+
+    assert(backend.close_handle(*token).has_value());
+
+    std::array<voris::io::backend_completion, 1> one_completion{};
+    auto drained = backend.drain_completions(one_completion);
+    assert(drained.has_value());
+    assert(*drained == 0);
+
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 2);
+
+    drained = backend.drain_completions(one_completion);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_completion_error(one_completion[0], 1, voris::io::vio_error_code::closed);
+
+    drained = backend.drain_completions(one_completion);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_completion_error(one_completion[0], 2, voris::io::vio_error_code::closed);
+
+    drained = backend.drain_completions(one_completion);
+    assert(drained.has_value());
+    assert(*drained == 0);
+
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+
+    std::array<voris::io::backend_completion, 4> completions{};
+    drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_completion_error(completions[0], 3, voris::io::vio_error_code::closed);
+}
+
+void test_shutdown_closes_queued_and_pending_operations() {
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), voris::io::backends::io_uring_backend_options{
+                                 .submission_queue_capacity = 8,
+                                 .submit_batch_limit = 1,
+                                 .completion_batch_limit = 8,
+                             });
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    assert(backend.submit(operation(1, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+    assert(backend.submit(operation(2, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+    assert(backend.submit(operation(3, voris::io::backend_operation_kind::read, *token))
+               .has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+
+    assert(backend.shutdown().has_value());
+    assert(backend.state() == voris::io::backends::io_uring_backend_state::closed);
+    assert_io_error(backend.poll(), voris::io::vio_error_code::closed);
+    assert_void_error(backend.submit(operation(4, voris::io::backend_operation_kind::read,
+                                               *token)),
+                      voris::io::vio_error_code::closed);
+    assert_void_error(backend.wake(), voris::io::vio_error_code::closed);
+
+    std::array<voris::io::backend_completion, 4> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 3);
+    assert_completion_error(completions[0], 1, voris::io::vio_error_code::closed);
+    assert_completion_error(completions[1], 2, voris::io::vio_error_code::closed);
+    assert_completion_error(completions[2], 3, voris::io::vio_error_code::closed);
+
+    drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 0);
+}
+
 void test_detected_capabilities_are_conservative() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
     voris::io::backends::io_uring_backend backend(caps);
@@ -365,6 +620,13 @@ int main() {
     test_probe_registered_capabilities_are_independent_candidates();
     test_submit_rejects_missing_operation_opcodes();
     test_optional_registrations_follow_capabilities();
+    test_lifecycle_state_tracks_availability_and_shutdown();
+    test_empty_completion_drain_is_invalid_state();
+    test_submit_validates_operation_before_queueing();
+    test_submission_queue_is_bounded();
+    test_poll_flushes_submissions_in_batches();
+    test_poll_observes_completions_in_batches_and_drain_preserves_order();
+    test_shutdown_closes_queued_and_pending_operations();
     test_detected_capabilities_are_conservative();
 
     auto caps = backends::io_uring_capabilities{
@@ -381,11 +643,14 @@ int main() {
     auto token = backend.register_handle(1);
     assert(token.has_value());
     assert(backend.submit(operation(1, backend_operation_kind::read, *token)).has_value());
-    assert(backend.cancel(1, cancellation_reason::manual).has_value());
     assert(backend.poll().has_value());
+    assert(backend.cancel(1, cancellation_reason::manual).has_value());
     assert(backend.close_handle(*token).has_value());
+    assert(backend.poll().has_value());
     std::array<backend_completion, 2> completions{};
-    assert(backend.drain_completions(completions).has_value());
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
     assert(backend.shutdown().has_value());
 
     return 0;
