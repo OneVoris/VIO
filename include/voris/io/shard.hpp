@@ -51,6 +51,7 @@ public:
 
 private:
     void run_loop();
+    [[nodiscard]] io_result<std::size_t> run_one_loop_iteration_under_current_scheduler();
 
     detail::mailbox mailbox_;
     loop_budget budget_;

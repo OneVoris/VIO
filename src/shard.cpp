@@ -62,6 +62,11 @@ std::size_t shard::drain() {
 }
 
 io_result<std::size_t> shard::run_one_loop_iteration() {
+    current_scheduler_scope scope(scheduler());
+    return run_one_loop_iteration_under_current_scheduler();
+}
+
+io_result<std::size_t> shard::run_one_loop_iteration_under_current_scheduler() {
     auto slice = loop_budget_slice::create(budget_);
     if (!slice.has_value()) {
         return std::unexpected(slice.error());
@@ -123,7 +128,7 @@ void shard::run_loop() {
     current_scheduler_scope scope(scheduler());
     bool drain_on_exit = true;
     while (!stop_requested_) {
-        auto ran = run_one_loop_iteration();
+        auto ran = run_one_loop_iteration_under_current_scheduler();
         if (!ran.has_value()) {
             {
                 std::lock_guard lock(metrics_mutex_);

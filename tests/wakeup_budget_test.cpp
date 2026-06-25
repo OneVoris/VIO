@@ -1,6 +1,7 @@
 #include <voris/io/backend_wakeup.hpp>
 #include <voris/io/detail/mailbox.hpp>
 #include <voris/io/loop_budget.hpp>
+#include <voris/io/scheduler.hpp>
 #include <voris/io/shard.hpp>
 
 #include "test_assert.hpp"
@@ -282,12 +283,51 @@ int main() {
     }
 
     {
+        shard worker(4, loop_budget{.task_budget = 1, .completion_budget = 8, .timer_budget = 8});
+        const auto expected_scheduler = worker.scheduler();
+        bool saw_scheduler = false;
+        bool matched_scheduler = false;
+        assert(worker.submit([&] {
+                         auto current = require_current_scheduler();
+                         saw_scheduler = current.has_value();
+                         if (current.has_value()) {
+                             matched_scheduler = *current == expected_scheduler;
+                         }
+                     })
+                   .has_value());
+
+        auto turn = worker.run_one_loop_iteration();
+        assert(turn.has_value());
+        assert(*turn == 1);
+        assert(saw_scheduler);
+        assert(matched_scheduler);
+    }
+
+    {
         shard worker(4, loop_budget{.task_budget = 0, .completion_budget = 8, .timer_budget = 8});
         bool ran = false;
         assert(worker.submit([&ran] { ran = true; }).has_value());
 
         worker.start();
-        worker.join();
+
+        std::mutex mutex;
+        std::condition_variable joined;
+        bool join_returned = false;
+        std::thread joiner([&] {
+            worker.join();
+            {
+                std::lock_guard lock(mutex);
+                join_returned = true;
+            }
+            joined.notify_one();
+        });
+
+        {
+            std::unique_lock lock(mutex);
+            assert(joined.wait_for(lock, 2s, [&] { return join_returned; }));
+        }
+
+        joiner.join();
 
         auto error = worker.last_loop_error();
         assert(error.has_value());
