@@ -404,5 +404,34 @@ int main() {
         assert_task_code(waiter, vio_error_code::invalid_state);
     }
 
+    {
+        default_scheduler scheduler;
+        scheduler_ref ref(scheduler);
+        task<vio_error_code> waiter;
+        bool resumed = false;
+
+        {
+            current_scheduler_scope scope(ref);
+            async_mutex mutex(1);
+            assert(mutex.try_lock().has_value());
+            waiter = lock_code(mutex, resumed);
+            assert(!waiter.is_ready());
+            assert(mutex.waiters() == 1);
+
+            mutex.unlock();
+            assert(mutex.locked());
+            assert(mutex.waiters() == 0);
+            assert(scheduler.ready_count() == 1);
+            assert(!resumed);
+        }
+
+        assert(!resumed);
+        assert(scheduler.ready_count() == 1);
+        assert(scheduler.run_until_idle() == 1);
+        assert(resumed);
+        assert(waiter.is_ready());
+        assert_task_code(waiter, vio_error_code::invalid_state);
+    }
+
     return 0;
 }
