@@ -480,6 +480,32 @@ std::span<const std::byte> address_bytes(const sockaddr_in& address) noexcept {
     return std::as_bytes(std::span<const sockaddr_in>(&address, 1));
 }
 
+void assert_registration_failure_is_environmental(
+    const voris::io::void_result& result) {
+    assert(!result.has_value());
+    const auto& error = result.error();
+    assert(error.classification == voris::io::vio_error_code::backend_failure);
+    assert(error.provider_code.has_value());
+
+    const auto provider_code = static_cast<int>(*error.provider_code);
+    assert(provider_code != EINVAL);
+    assert(provider_code != EFAULT);
+
+    // These indicate host policy or resource pressure rather than a bad
+    // io_uring_register opcode, pointer, or argument shape.
+    switch (provider_code) {
+    case EACCES:
+    case EMFILE:
+    case ENFILE:
+    case ENOMEM:
+    case ENOSPC:
+    case EPERM:
+        return;
+    default:
+        assert(false);
+    }
+}
+
 int release_nonzero_fd(unique_fd& fd) {
     const int released = fd.release();
     if (released != 0) {
@@ -1075,8 +1101,7 @@ void test_linux_real_io_uring_registered_buffers_lifecycle_when_supported() {
 
     auto registered = backend.register_buffers(buffers);
     if (!registered.has_value()) {
-        assert(registered.error().classification ==
-               voris::io::vio_error_code::backend_failure);
+        assert_registration_failure_is_environmental(registered);
         assert(backend.registered_buffer_count() == 0);
         assert(backend.shutdown().has_value());
         return;
@@ -1106,8 +1131,7 @@ void test_linux_real_io_uring_registered_files_lifecycle_when_supported() {
 
     auto registered = backend.register_files(files);
     if (!registered.has_value()) {
-        assert(registered.error().classification ==
-               voris::io::vio_error_code::backend_failure);
+        assert_registration_failure_is_environmental(registered);
         assert(backend.registered_file_count() == 0);
         assert(backend.shutdown().has_value());
         return;
