@@ -33,16 +33,25 @@ struct buffer_chain_view {
     std::span<const std::byte> bytes;
 };
 
+struct socket_address_view {
+    std::span<const std::byte> bytes;
+};
+
 [[nodiscard]] std::size_t total_size(std::span<const buffer_chain_view> buffers) noexcept;
 
 /// Borrowed native socket helpers. The caller keeps ownership and must pass an
-/// already-nonblocking socket descriptor or handle. Non-empty I/O is currently
-/// implemented on Linux; `write_some` is socket-only because Linux uses
-/// `send(..., MSG_NOSIGNAL)`, so ordinary pipe or file descriptors may fail
-/// with provider `ENOTSOCK`.
+/// already-nonblocking socket descriptor or handle. Accepted handles are
+/// returned without retained library ownership. Non-empty I/O and socket
+/// connection helpers are currently implemented on Linux; `write_some` is
+/// socket-only because Linux uses `send(..., MSG_NOSIGNAL)`, so ordinary pipe
+/// or file descriptors may fail with provider `ENOTSOCK`.
 [[nodiscard]] io_result<std::size_t> read_some(std::size_t native_handle,
                                                std::span<std::byte> buffer);
 [[nodiscard]] io_result<std::size_t> write_some(std::size_t native_handle,
                                                 std::span<const std::byte> buffer);
+[[nodiscard]] io_result<std::size_t> accept_one(std::size_t native_handle);
+[[nodiscard]] void_result start_connect(std::size_t native_handle,
+                                        socket_address_view remote_address);
+[[nodiscard]] void_result finish_connect(std::size_t native_handle);
 
 } // namespace voris::io

@@ -8,8 +8,11 @@
 #include "test_assert.hpp"
 
 #if defined(__linux__)
+#include <arpa/inet.h>
 #include <cerrno>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -17,6 +20,12 @@
 namespace {
 
 void assert_size_error(const voris::io::io_result<std::size_t>& result,
+                       voris::io::vio_error_code expected) {
+    assert(!result.has_value());
+    assert(result.error().classification == expected);
+}
+
+void assert_void_error(const voris::io::void_result& result,
                        voris::io::vio_error_code expected) {
     assert(!result.has_value());
     assert(result.error().classification == expected);
@@ -119,6 +128,48 @@ std::array<unique_fd, 2> make_socket_pair() {
     return {unique_fd(fds[0]), unique_fd(fds[1])};
 }
 
+unique_fd make_tcp_socket() {
+    int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    assert(fd >= 0);
+    if (fd != 0) {
+        return unique_fd(fd);
+    }
+
+    const int duplicate = ::fcntl(fd, F_DUPFD_CLOEXEC, 1);
+    assert(duplicate > 0);
+    assert(::close(fd) == 0);
+    return unique_fd(duplicate);
+}
+
+unique_fd make_loopback_listener() {
+    unique_fd listener = make_tcp_socket();
+    int reuse = 1;
+    assert(::setsockopt(listener.get(), SOL_SOCKET, SO_REUSEADDR, &reuse,
+                        static_cast<socklen_t>(sizeof(reuse))) == 0);
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    assert(::bind(listener.get(), reinterpret_cast<const sockaddr*>(&address),
+                  static_cast<socklen_t>(sizeof(address))) == 0);
+    assert(::listen(listener.get(), 4) == 0);
+    return listener;
+}
+
+sockaddr_in get_socket_address(int fd) {
+    sockaddr_in address{};
+    socklen_t length = static_cast<socklen_t>(sizeof(address));
+    assert(::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+    assert(length == static_cast<socklen_t>(sizeof(address)));
+    return address;
+}
+
+voris::io::socket_address_view address_view(const sockaddr_in& address) {
+    return voris::io::socket_address_view{
+        std::as_bytes(std::span<const sockaddr_in>(&address, 1))};
+}
+
 void set_nonblocking_fd(int fd) {
     const int flags = ::fcntl(fd, F_GETFL, 0);
     assert(flags != -1);
@@ -153,6 +204,141 @@ void fill_socket_until_would_block(int fd) {
         return;
     }
     assert(false);
+}
+
+void wait_for_events(int fd, short events) {
+    pollfd descriptor{.fd = fd, .events = events, .revents = 0};
+    for (;;) {
+        const int count = ::poll(&descriptor, 1, 2000);
+        if (count > 0) {
+            assert((descriptor.revents & (events | POLLERR | POLLHUP)) != 0);
+            return;
+        }
+        if (count == -1 && errno == EINTR) {
+            continue;
+        }
+        assert(false);
+    }
+}
+
+void test_linux_accept_one_without_pending_connection_reports_in_progress() {
+    using voris::io::accept_one;
+    using voris::io::vio_error_code;
+
+    auto listener = make_loopback_listener();
+    voris::io::io_result<std::size_t> accepted =
+        accept_one(static_cast<std::size_t>(listener.get()));
+    assert_size_error(accepted, vio_error_code::operation_in_progress);
+    assert(!accepted.error().provider_code.has_value());
+}
+
+void test_linux_nonblocking_connect_accept_and_data_path() {
+    using voris::io::accept_one;
+    using voris::io::finish_connect;
+    using voris::io::read_some;
+    using voris::io::start_connect;
+    using voris::io::vio_error_code;
+    using voris::io::write_some;
+
+    auto listener = make_loopback_listener();
+    const sockaddr_in address = get_socket_address(listener.get());
+    auto client = make_tcp_socket();
+
+    voris::io::void_result started =
+        start_connect(static_cast<std::size_t>(client.get()), address_view(address));
+    assert(started.has_value() ||
+           started.error().classification == vio_error_code::operation_in_progress);
+    if (!started.has_value()) {
+        assert(!started.error().provider_code.has_value());
+        wait_for_events(client.get(), POLLOUT);
+    }
+
+    voris::io::void_result finished = finish_connect(static_cast<std::size_t>(client.get()));
+    assert(finished.has_value());
+
+    wait_for_events(listener.get(), POLLIN);
+    voris::io::io_result<std::size_t> accepted =
+        accept_one(static_cast<std::size_t>(listener.get()));
+    assert(accepted.has_value());
+    assert(*accepted != 0);
+    unique_fd server(static_cast<int>(*accepted));
+
+    const int status_flags = ::fcntl(server.get(), F_GETFL, 0);
+    assert(status_flags != -1);
+    assert((status_flags & O_NONBLOCK) != 0);
+    const int descriptor_flags = ::fcntl(server.get(), F_GETFD, 0);
+    assert(descriptor_flags != -1);
+    assert((descriptor_flags & FD_CLOEXEC) != 0);
+
+    const std::array<std::byte, 4> input{std::byte{0x76}, std::byte{0x69},
+                                        std::byte{0x6f}, std::byte{0x21}};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(client.get()), input);
+    assert(written.has_value());
+    assert(*written == input.size());
+
+    wait_for_events(server.get(), POLLIN);
+    std::array<std::byte, 4> output{};
+    voris::io::io_result<std::size_t> read =
+        read_some(static_cast<std::size_t>(server.get()), output);
+    assert(read.has_value());
+    assert(*read == output.size());
+    assert(output == input);
+}
+
+void test_linux_refused_connect_reports_so_error_provider_failure() {
+    using voris::io::finish_connect;
+    using voris::io::start_connect;
+    using voris::io::vio_error_code;
+
+    sockaddr_in address{};
+    {
+        auto listener = make_loopback_listener();
+        address = get_socket_address(listener.get());
+    }
+
+    auto client = make_tcp_socket();
+    voris::io::void_result started =
+        start_connect(static_cast<std::size_t>(client.get()), address_view(address));
+    if (!started.has_value()) {
+        if (started.error().classification == vio_error_code::backend_failure) {
+            assert(started.error().provider_code.has_value());
+            assert(*started.error().provider_code == ECONNREFUSED);
+            return;
+        }
+        assert(started.error().classification == vio_error_code::operation_in_progress);
+        assert(!started.error().provider_code.has_value());
+    }
+
+    wait_for_events(client.get(), POLLOUT);
+    voris::io::void_result finished = finish_connect(static_cast<std::size_t>(client.get()));
+    assert_void_error(finished, vio_error_code::backend_failure);
+    assert(finished.error().provider_code.has_value());
+    assert(*finished.error().provider_code == ECONNREFUSED);
+}
+
+void test_linux_accept_connect_validation() {
+    using voris::io::accept_one;
+    using voris::io::finish_connect;
+    using voris::io::socket_address_view;
+    using voris::io::start_connect;
+    using voris::io::vio_error_code;
+
+    const std::size_t too_large =
+        static_cast<std::size_t>(std::numeric_limits<int>::max()) + std::size_t{1};
+    std::array<std::byte, sizeof(sockaddr_in)> bytes{};
+    const socket_address_view address{std::span<const std::byte>(bytes)};
+    auto client = make_tcp_socket();
+
+    assert_size_error(accept_one(0), vio_error_code::invalid_state);
+    assert_size_error(accept_one(too_large), vio_error_code::invalid_state);
+    assert_void_error(start_connect(0, address), vio_error_code::invalid_state);
+    assert_void_error(start_connect(too_large, address), vio_error_code::invalid_state);
+    assert_void_error(start_connect(static_cast<std::size_t>(client.get()),
+                                    socket_address_view{}),
+                      vio_error_code::invalid_state);
+    assert_void_error(finish_connect(0), vio_error_code::invalid_state);
+    assert_void_error(finish_connect(too_large), vio_error_code::invalid_state);
 }
 
 void test_linux_read_some_reports_partial_progress_without_taking_ownership() {
@@ -336,6 +522,26 @@ void test_non_linux_read_write_some_validation_and_unsupported() {
     assert_size_error(write_some(1, input), vio_error_code::unsupported);
 }
 
+void test_non_linux_accept_connect_validation_and_unsupported() {
+    using voris::io::accept_one;
+    using voris::io::finish_connect;
+    using voris::io::socket_address_view;
+    using voris::io::start_connect;
+    using voris::io::vio_error_code;
+
+    const std::array<std::byte, 1> address_bytes{std::byte{0x01}};
+    const socket_address_view address{std::span<const std::byte>(address_bytes)};
+
+    assert_size_error(accept_one(0), vio_error_code::invalid_state);
+    assert_void_error(start_connect(0, address), vio_error_code::invalid_state);
+    assert_void_error(start_connect(1, socket_address_view{}), vio_error_code::invalid_state);
+    assert_void_error(finish_connect(0), vio_error_code::invalid_state);
+
+    assert_size_error(accept_one(1), vio_error_code::unsupported);
+    assert_void_error(start_connect(1, address), vio_error_code::unsupported);
+    assert_void_error(finish_connect(1), vio_error_code::unsupported);
+}
+
 #endif
 
 } // namespace
@@ -346,6 +552,10 @@ int main() {
     test_socket_io_size_cap();
 
 #if defined(__linux__)
+    test_linux_accept_one_without_pending_connection_reports_in_progress();
+    test_linux_nonblocking_connect_accept_and_data_path();
+    test_linux_refused_connect_reports_so_error_provider_failure();
+    test_linux_accept_connect_validation();
     test_linux_read_some_reports_partial_progress_without_taking_ownership();
     test_linux_write_some_on_non_socket_reports_provider_error();
     test_linux_would_block_read_uses_operation_in_progress();
@@ -356,6 +566,7 @@ int main() {
     test_linux_closed_fd_reports_provider_error();
 #else
     test_non_linux_read_write_some_validation_and_unsupported();
+    test_non_linux_accept_connect_validation_and_unsupported();
 #endif
 
     return 0;
