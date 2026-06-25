@@ -75,30 +75,30 @@ constexpr std::size_t local_iovec_capacity = 1024;
 
 struct iovec_chain {
     std::array<iovec, local_iovec_capacity> entries{};
-    std::size_t count = 0;
-    std::size_t requested = 0;
+    detail::socket_iovec_plan plan{};
 };
 
 template <class Buffer>
 [[nodiscard]] iovec_chain build_iovec_chain(std::span<const Buffer> buffers) noexcept {
     iovec_chain chain{};
     const std::size_t iovec_limit = platform_iovec_limit();
-    std::size_t remaining = detail::max_safe_socket_io_size();
 
     for (const auto& buffer : buffers) {
         if (buffer.bytes.empty()) {
             continue;
         }
-        if (chain.count >= iovec_limit || remaining == 0) {
+        if (detail::socket_iovec_plan_full(chain.plan, iovec_limit)) {
             break;
         }
 
-        const std::size_t length = std::min(buffer.bytes.size(), remaining);
-        chain.entries[chain.count].iov_base = iovec_base(buffer.bytes);
-        chain.entries[chain.count].iov_len = length;
-        ++chain.count;
-        chain.requested += length;
-        remaining -= length;
+        const std::size_t index = chain.plan.iovec_count;
+        const std::size_t length =
+            detail::append_socket_iovec_segment(chain.plan, buffer.bytes.size(), iovec_limit);
+        if (length == 0) {
+            break;
+        }
+        chain.entries[index].iov_base = iovec_base(buffer.bytes);
+        chain.entries[index].iov_len = length;
     }
 
     return chain;
@@ -235,13 +235,14 @@ io_result<std::size_t> read_some(std::size_t native_handle,
 
 #if defined(__linux__)
     auto chain = build_iovec_chain(buffers);
-    if (chain.count == 0 || chain.requested == 0) {
+    if (chain.plan.iovec_count == 0 || chain.plan.requested_size == 0) {
         return std::size_t{0};
     }
 
     const int fd = static_cast<int>(native_handle);
     for (;;) {
-        const ssize_t count = ::readv(fd, chain.entries.data(), iovec_count(chain.count));
+        const ssize_t count =
+            ::readv(fd, chain.entries.data(), iovec_count(chain.plan.iovec_count));
         if (count >= 0) {
             return static_cast<std::size_t>(count);
         }
@@ -308,14 +309,14 @@ io_result<std::size_t> write_some(std::size_t native_handle,
 
 #if defined(__linux__)
     auto chain = build_iovec_chain(buffers);
-    if (chain.count == 0 || chain.requested == 0) {
+    if (chain.plan.iovec_count == 0 || chain.plan.requested_size == 0) {
         return std::size_t{0};
     }
 
     const int fd = static_cast<int>(native_handle);
     msghdr message{};
     message.msg_iov = chain.entries.data();
-    message.msg_iovlen = chain.count;
+    message.msg_iovlen = chain.plan.iovec_count;
 
     for (;;) {
         const ssize_t count = ::sendmsg(fd, &message, MSG_NOSIGNAL);

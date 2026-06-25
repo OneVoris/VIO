@@ -83,6 +83,40 @@ void test_socket_io_size_cap() {
     assert(cap_socket_io_size(std::numeric_limits<std::size_t>::max()) == cap);
 }
 
+void test_socket_iovec_plan_caps_segments() {
+    using voris::io::detail::append_socket_iovec_segment;
+    using voris::io::detail::socket_iovec_plan;
+    using voris::io::detail::socket_iovec_plan_full;
+
+    socket_iovec_plan plan{};
+    assert(append_socket_iovec_segment(plan, 0, 2, 6) == 0);
+    assert(plan.iovec_count == 0);
+    assert(plan.requested_size == 0);
+    assert(!socket_iovec_plan_full(plan, 2, 6));
+
+    assert(append_socket_iovec_segment(plan, 4, 2, 6) == 4);
+    assert(plan.iovec_count == 1);
+    assert(plan.requested_size == 4);
+    assert(append_socket_iovec_segment(plan, 5, 2, 6) == 2);
+    assert(plan.iovec_count == 2);
+    assert(plan.requested_size == 6);
+    assert(socket_iovec_plan_full(plan, 2, 6));
+    assert(append_socket_iovec_segment(plan, 1, 2, 6) == 0);
+    assert(plan.iovec_count == 2);
+    assert(plan.requested_size == 6);
+
+    socket_iovec_plan iovec_capped{};
+    assert(append_socket_iovec_segment(iovec_capped, 3, 1, 99) == 3);
+    assert(append_socket_iovec_segment(iovec_capped, 3, 1, 99) == 0);
+    assert(iovec_capped.iovec_count == 1);
+    assert(iovec_capped.requested_size == 3);
+
+    socket_iovec_plan zero_iovec_limit{};
+    assert(append_socket_iovec_segment(zero_iovec_limit, 3, 0, 99) == 0);
+    assert(zero_iovec_limit.iovec_count == 0);
+    assert(zero_iovec_limit.requested_size == 0);
+}
+
 void test_accept_pending_network_errors_are_retryable() {
     using voris::io::detail::is_accept_retryable_pending_network_error;
 
@@ -476,6 +510,27 @@ void test_linux_write_some_on_non_socket_reports_provider_error() {
     assert(*written.error().provider_code == ENOTSOCK);
 }
 
+void test_linux_vector_write_some_on_non_socket_reports_provider_error() {
+    using voris::io::buffer_chain_view;
+    using voris::io::vio_error_code;
+    using voris::io::write_some;
+
+    auto pipe = make_pipe();
+    set_nonblocking_fd(pipe[1].get());
+
+    const std::array<std::byte, 1> first{std::byte{0x64}};
+    const std::array<std::byte, 1> second{std::byte{0x65}};
+    const std::array<buffer_chain_view, 2> buffers{{
+        buffer_chain_view{std::span<const std::byte>(first)},
+        buffer_chain_view{std::span<const std::byte>(second)},
+    }};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(pipe[1].get()), buffers);
+    assert_size_error(written, vio_error_code::backend_failure);
+    assert(written.error().provider_code.has_value());
+    assert(*written.error().provider_code == ENOTSOCK);
+}
+
 void test_linux_would_block_read_uses_operation_in_progress() {
     using voris::io::read_some;
     using voris::io::vio_error_code;
@@ -776,6 +831,7 @@ int main() {
     test_socket_operation_queue();
     test_total_size();
     test_socket_io_size_cap();
+    test_socket_iovec_plan_caps_segments();
     test_accept_pending_network_errors_are_retryable();
 
 #if defined(__linux__)
@@ -786,6 +842,7 @@ int main() {
     test_linux_read_some_reports_partial_progress_without_taking_ownership();
     test_linux_vector_read_write_preserves_buffer_order_and_partial_progress();
     test_linux_write_some_on_non_socket_reports_provider_error();
+    test_linux_vector_write_some_on_non_socket_reports_provider_error();
     test_linux_would_block_read_uses_operation_in_progress();
     test_linux_would_block_write_uses_operation_in_progress();
     test_linux_vector_would_block_read_uses_operation_in_progress();
