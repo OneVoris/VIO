@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <deque>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 #include <voris/io/cancellation.hpp>
@@ -88,12 +89,17 @@ private:
     };
 
     [[nodiscard]] bool is_current_handle(backend_handle_token token) const noexcept;
-    [[nodiscard]] void_result complete_ready(backend_handle_token token);
+    [[nodiscard]] void_result complete_ready(backend_handle_token token,
+                                             backend_operation_kind readiness_kind);
     void complete_pending(backend_handle_token token, const void_result& result);
+    void complete_pending(backend_handle_token token,
+                          backend_operation_kind readiness_kind,
+                          const void_result& result);
 
     detail::native_handle_registry registry_{};
     std::vector<pending_operation> pending_{};
     std::deque<backend_completion> completions_{};
+    std::unordered_set<std::size_t> active_operation_ids_{};
     std::size_t registered_{0};
     std::size_t submitted_{0};
     std::size_t cancelled_{0};

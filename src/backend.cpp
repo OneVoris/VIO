@@ -50,14 +50,11 @@ void_result virtual_backend::submit(backend_operation operation) {
     if (!is_current_handle(operation.handle)) {
         return invalid_state("operation handle token is not current");
     }
-    const auto operation_id = operation.id;
-    const auto duplicate = std::ranges::find_if(pending_, [operation_id](const auto& pending) {
-        return pending.operation.id == operation_id;
-    });
-    if (duplicate != pending_.end()) {
-        return invalid_state("operation id is already pending");
+    if (active_operation_ids_.contains(operation.id)) {
+        return invalid_state("operation id is already active");
     }
 
+    active_operation_ids_.insert(operation.id);
     pending_.push_back(pending_operation{operation});
     ++submitted_;
     return {};
@@ -109,6 +106,7 @@ io_result<std::size_t> virtual_backend::drain_completions(
 
     const auto count = std::min(out.size(), completions_.size());
     for (std::size_t index = 0; index < count; ++index) {
+        active_operation_ids_.erase(completions_.front().operation_id);
         out[index] = std::move(completions_.front());
         completions_.pop_front();
     }
@@ -154,18 +152,39 @@ bool virtual_backend::is_current_handle(backend_handle_token token) const noexce
     return registry_.is_current(to_native_token(token));
 }
 
-void_result virtual_backend::complete_ready(backend_handle_token token) {
+void_result virtual_backend::complete_ready(backend_handle_token token,
+                                            backend_operation_kind readiness_kind) {
     if (!is_current_handle(token)) {
         return invalid_state("operation handle token is not current");
     }
 
-    complete_pending(token, {});
+    complete_pending(token, readiness_kind, {});
     return {};
 }
 
 void virtual_backend::complete_pending(backend_handle_token token, const void_result& result) {
     for (auto iterator = pending_.begin(); iterator != pending_.end();) {
         if (iterator->operation.handle == token) {
+            completions_.push_back(backend_completion{iterator->operation.id, result});
+            iterator = pending_.erase(iterator);
+            continue;
+        }
+        ++iterator;
+    }
+}
+
+void virtual_backend::complete_pending(backend_handle_token token,
+                                       backend_operation_kind readiness_kind,
+                                       const void_result& result) {
+    for (auto iterator = pending_.begin(); iterator != pending_.end();) {
+        const bool kind_matches =
+            (readiness_kind == backend_operation_kind::read &&
+             (iterator->operation.kind == backend_operation_kind::read ||
+              iterator->operation.kind == backend_operation_kind::accept)) ||
+            (readiness_kind == backend_operation_kind::write &&
+             (iterator->operation.kind == backend_operation_kind::write ||
+              iterator->operation.kind == backend_operation_kind::connect));
+        if (iterator->operation.handle == token && kind_matches) {
             completions_.push_back(backend_completion{iterator->operation.id, result});
             iterator = pending_.erase(iterator);
             continue;

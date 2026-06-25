@@ -22,6 +22,16 @@ voris::io::backend_operation operation(std::size_t id,
     return result;
 }
 
+voris::io::backend_operation operation(std::size_t id,
+                                       voris::io::backend_operation_kind kind,
+                                       voris::io::backend_handle_token token) {
+    voris::io::backend_operation result{};
+    result.id = id;
+    result.kind = kind;
+    result.handle = token;
+    return result;
+}
+
 void assert_void_error(const voris::io::void_result& result, voris::io::vio_error_code expected) {
     assert(!result.has_value());
     assert(result.error().classification == expected);
@@ -217,6 +227,62 @@ void test_close_pending_operation_wins_over_queued_readiness() {
     assert(backend.shutdown().has_value());
 }
 
+void test_close_after_external_fd_close_still_completes_pending_operation() {
+    unique_fd fd = make_event_fd();
+
+    voris::io::backends::epoll_backend backend;
+    auto token = require_token(backend.register_handle(static_cast<std::size_t>(fd.get())));
+    assert(backend.submit(operation(351, token)).has_value());
+
+    const int raw_fd = fd.release();
+    assert(::close(raw_fd) == 0);
+
+    assert(backend.close_handle(token).has_value());
+
+    std::array<voris::io::backend_completion, 8> completions{};
+    assert(drain(backend, completions) == 1);
+    assert_closed_completion(completions[0], 351);
+
+    assert_void_error(backend.submit(operation(352, token)), voris::io::vio_error_code::invalid_state);
+    assert_void_error(backend.close_handle(token), voris::io::vio_error_code::invalid_state);
+    assert(backend.shutdown().has_value());
+}
+
+void test_readiness_mask_completes_only_compatible_operation_kind() {
+    unique_fd read_end;
+    unique_fd write_end;
+    make_pipe(read_end, write_end);
+
+    voris::io::backends::epoll_backend backend;
+    auto token = require_token(backend.register_handle(static_cast<std::size_t>(write_end.get())));
+
+    assert(backend.submit(
+               operation(361, voris::io::backend_operation_kind::read, token))
+               .has_value());
+
+    auto write_ready_only = backend.poll();
+    assert(write_ready_only.has_value());
+
+    std::array<voris::io::backend_completion, 8> completions{};
+    assert(drain(backend, completions) == 0);
+
+    assert(backend.submit(
+               operation(362, voris::io::backend_operation_kind::write, token))
+               .has_value());
+
+    write_ready_only = backend.poll();
+    assert(write_ready_only.has_value());
+
+    assert(drain(backend, completions) == 1);
+    assert(completions[0].operation_id == 362);
+    assert(completions[0].result.has_value());
+
+    assert(backend.close_handle(token).has_value());
+    assert(drain(backend, completions) == 1);
+    assert_closed_completion(completions[0], 361);
+    assert(backend.shutdown().has_value());
+}
+
 void test_same_numeric_fd_reuse_uses_new_generation() {
     unique_fd old_read;
     unique_fd old_write;
@@ -314,6 +380,8 @@ int main() {
     test_register_validates_and_reports_provider_errors();
     test_close_deregisters_without_taking_ownership();
     test_close_pending_operation_wins_over_queued_readiness();
+    test_close_after_external_fd_close_still_completes_pending_operation();
+    test_readiness_mask_completes_only_compatible_operation_kind();
     test_same_numeric_fd_reuse_uses_new_generation();
     test_shutdown_defines_later_behavior();
 #else

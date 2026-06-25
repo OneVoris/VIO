@@ -122,6 +122,29 @@ void test_reuse_requires_current_generation() {
     assert(backend.close_handle(reused).has_value());
 }
 
+void test_operation_id_cannot_reuse_until_completion_is_drained() {
+    using namespace voris::io;
+
+    virtual_backend backend;
+    auto closing = require_token(backend.register_handle(50));
+    auto other = require_token(backend.register_handle(51));
+
+    assert(backend.submit(operation(77, backend_operation_kind::read, closing)).has_value());
+    assert(backend.close_handle(closing).has_value());
+
+    assert_void_error(backend.submit(operation(77, backend_operation_kind::write, other)),
+                      vio_error_code::invalid_state);
+
+    std::array<backend_completion, 2> completions{};
+    assert(drain(backend, completions) == 1);
+    assert_completion(completions[0], 77, vio_error_code::closed);
+
+    assert(backend.submit(operation(77, backend_operation_kind::write, other)).has_value());
+    assert(backend.close_handle(other).has_value());
+    assert(drain(backend, completions) == 1);
+    assert_completion(completions[0], 77, vio_error_code::closed);
+}
+
 void test_shutdown_rejects_new_work_and_drains_pending_as_closed() {
     using namespace voris::io;
 
@@ -147,6 +170,7 @@ void test_shutdown_rejects_new_work_and_drains_pending_as_closed() {
 int main() {
     test_register_submit_close_and_drain_contract();
     test_reuse_requires_current_generation();
+    test_operation_id_cannot_reuse_until_completion_is_drained();
     test_shutdown_rejects_new_work_and_drains_pending_as_closed();
 
     return 0;

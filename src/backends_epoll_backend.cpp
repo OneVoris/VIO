@@ -46,6 +46,14 @@ constexpr std::uint64_t token_low_mask = (std::uint64_t{1} << token_generation_s
         static_cast<std::size_t>(cookie >> token_generation_shift),
     };
 }
+
+[[nodiscard]] bool has_read_readiness(std::uint32_t events) noexcept {
+    return (events & (EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0;
+}
+
+[[nodiscard]] bool has_write_readiness(std::uint32_t events) noexcept {
+    return (events & (EPOLLOUT | EPOLLERR | EPOLLHUP)) != 0;
+}
 #else
 [[nodiscard]] vio_error unsupported_error() {
     return make_error(vio_error_code::unsupported, "epoll backend is only available on Linux");
@@ -192,7 +200,10 @@ void_result epoll_backend::close_handle(backend_handle_token token) {
 
     if (::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, static_cast<int>(token.native_handle), nullptr) !=
         0) {
-        return std::unexpected(provider_failure(errno));
+        const int provider_code = errno;
+        if (provider_code != EBADF && provider_code != ENOENT) {
+            return std::unexpected(provider_failure(provider_code));
+        }
     }
 
     return fallback_.close_handle(token);
@@ -222,15 +233,27 @@ io_result<std::size_t> epoll_backend::poll() {
 
     std::size_t observed = 0;
     for (int index = 0; index < ready; ++index) {
-        const auto cookie = events[static_cast<std::size_t>(index)].data.u64;
+        const auto& event = events[static_cast<std::size_t>(index)];
+        const auto cookie = event.data.u64;
         if (cookie != wake_event_cookie) {
             const auto token = unpack_event_cookie(cookie);
             if (!fallback_.is_current_handle(token)) {
                 continue;
             }
             ++observed;
-            if (auto completed = fallback_.complete_ready(token); !completed.has_value()) {
-                return std::unexpected(completed.error());
+            if (has_read_readiness(event.events)) {
+                if (auto completed =
+                        fallback_.complete_ready(token, backend_operation_kind::read);
+                    !completed.has_value()) {
+                    return std::unexpected(completed.error());
+                }
+            }
+            if (has_write_readiness(event.events)) {
+                if (auto completed =
+                        fallback_.complete_ready(token, backend_operation_kind::write);
+                    !completed.has_value()) {
+                    return std::unexpected(completed.error());
+                }
             }
             continue;
         }
