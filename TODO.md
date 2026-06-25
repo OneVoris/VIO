@@ -43,7 +43,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M3-002** Implement `sleep_until` and `sleep_for`.
 - [x] **VIO-M3-003** Implement timer cancellation, same-deadline batching, and clock-jump protection.
 - [x] **VIO-M3-004** Implement bounded `channel<T>` send, receive, and close.
-- [ ] **VIO-M3-005** Add cancellation and deadlines to channel waiters.
+- [x] **VIO-M3-005** Add cancellation and deadlines to channel waiters.
 - [ ] **VIO-M3-006** Implement `async_semaphore`.
 - [ ] **VIO-M3-007** Implement `async_mutex` without resuming waiters while holding its internal lock.
 - [x] **VIO-M3-008** Implement a manual-reset event.

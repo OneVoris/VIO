@@ -1,10 +1,14 @@
 #pragma once
 
+#include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <deque>
 #include <optional>
 #include <utility>
 
+#include <voris/io/cancellation.hpp>
+#include <voris/io/deadline.hpp>
 #include <voris/io/error.hpp>
 
 namespace voris::io {
@@ -34,11 +38,80 @@ public:
     }
 
     [[nodiscard]] void_result send(T value) {
+        return send_impl(std::move(value), [] { return std::optional<vio_error>{}; });
+    }
+
+    [[nodiscard]] void_result send(T value, const cancellation_token& token) {
+        return send_impl(std::move(value),
+                         [&token] { return cancellation_wait_error(token); });
+    }
+
+    template<class Clock, class Duration>
+        requires(Clock::is_steady)
+    [[nodiscard]] void_result send(T value,
+                                   const deadline& limit,
+                                   std::chrono::time_point<Clock, Duration> now) {
+        return send_impl(std::move(value),
+                         [&limit, now] { return deadline_wait_error(limit, now); });
+    }
+
+    [[nodiscard]] io_result<T> receive() {
+        return receive_impl([] { return std::optional<vio_error>{}; });
+    }
+
+    [[nodiscard]] io_result<T> receive(const cancellation_token& token) {
+        return receive_impl([&token] { return cancellation_wait_error(token); });
+    }
+
+    template<class Clock, class Duration>
+        requires(Clock::is_steady)
+    [[nodiscard]] io_result<T> receive(const deadline& limit,
+                                       std::chrono::time_point<Clock, Duration> now) {
+        return receive_impl([&limit, now] { return deadline_wait_error(limit, now); });
+    }
+
+    void close() noexcept {
+        closed_ = true;
+    }
+
+    [[nodiscard]] std::size_t waiting_senders() const noexcept {
+        return waiting_senders_;
+    }
+
+    [[nodiscard]] std::size_t waiting_receivers() const noexcept {
+        return waiting_receivers_;
+    }
+
+private:
+    [[nodiscard]] static std::optional<vio_error> cancellation_wait_error(
+        const cancellation_token& token) {
+        if (!token.cancellation_requested()) {
+            return std::nullopt;
+        }
+        return make_error(vio_error_code::cancelled, "channel waiter cancelled");
+    }
+
+    template<class Clock, class Duration>
+        requires(Clock::is_steady)
+    [[nodiscard]] static std::optional<vio_error> deadline_wait_error(
+        const deadline& limit,
+        std::chrono::time_point<Clock, Duration> now) {
+        if (!limit.expired(now)) {
+            return std::nullopt;
+        }
+        return deadline::cancellation_error();
+    }
+
+    template<class WaitGuard>
+    [[nodiscard]] void_result send_impl(T value, WaitGuard before_wait) {
         if (closed_) {
             return std::unexpected(make_error(vio_error_code::closed));
         }
         if (capacity_ == 0) {
             if (!waiting_receivers_) {
+                if (auto wait_error = before_wait(); wait_error.has_value()) {
+                    return std::unexpected(std::move(*wait_error));
+                }
                 ++waiting_senders_;
                 return std::unexpected(make_error(vio_error_code::resource_exhausted,
                                                   "rendezvous receiver is not ready"));
@@ -48,6 +121,9 @@ public:
             return {};
         }
         if (buffer_.size() >= capacity_) {
+            if (auto wait_error = before_wait(); wait_error.has_value()) {
+                return std::unexpected(std::move(*wait_error));
+            }
             ++waiting_senders_;
             return std::unexpected(make_error(vio_error_code::resource_exhausted,
                                               "channel is full"));
@@ -56,7 +132,8 @@ public:
         return {};
     }
 
-    [[nodiscard]] io_result<T> receive() {
+    template<class WaitGuard>
+    [[nodiscard]] io_result<T> receive_impl(WaitGuard before_wait) {
         if (rendezvous_value_.has_value()) {
             T value = std::move(*rendezvous_value_);
             rendezvous_value_.reset();
@@ -73,24 +150,13 @@ public:
         if (closed_) {
             return std::unexpected(make_error(vio_error_code::closed));
         }
+        if (auto wait_error = before_wait(); wait_error.has_value()) {
+            return std::unexpected(std::move(*wait_error));
+        }
         ++waiting_receivers_;
         return std::unexpected(make_error(vio_error_code::resource_exhausted,
                                           "channel is empty"));
     }
-
-    void close() noexcept {
-        closed_ = true;
-    }
-
-    [[nodiscard]] std::size_t waiting_senders() const noexcept {
-        return waiting_senders_;
-    }
-
-    [[nodiscard]] std::size_t waiting_receivers() const noexcept {
-        return waiting_receivers_;
-    }
-
-private:
     std::size_t capacity_;
     std::deque<T> buffer_;
     std::optional<T> rendezvous_value_;
