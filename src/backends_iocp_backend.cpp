@@ -1,5 +1,6 @@
 #include <voris/io/backends/iocp_backend.hpp>
 
+#include <algorithm>
 #include <vector>
 
 #if defined(_WIN32)
@@ -40,6 +41,15 @@ iocp_backend::iocp_backend(iocp_backend_options options) : options_(options) {
     if (options_.completion_batch_limit == 0) {
         options_.completion_batch_limit = 1;
     }
+    options_.completion_batch_limit =
+        std::min(options_.completion_batch_limit,
+                 detail::iocp_max_completion_batch_limit);
+    if (options_.native_packet_capacity == 0) {
+        options_.native_packet_capacity = options_.completion_batch_limit;
+    }
+    options_.native_packet_capacity =
+        std::min(options_.native_packet_capacity,
+                 detail::iocp_max_native_packet_capacity);
 
 #if defined(_WIN32)
     completion_port_ =
@@ -60,6 +70,125 @@ std::size_t iocp_backend::completion_batch_limit() const noexcept {
     return options_.completion_batch_limit;
 }
 
+std::size_t iocp_backend::native_packet_capacity() const noexcept {
+    return options_.native_packet_capacity;
+}
+
+io_result<detail::iocp_completion_key_token> iocp_backend::create_association(
+    backend_handle_token token) {
+    if (associations_.size() >= detail::iocp_max_association_count) {
+        return std::unexpected(make_error(vio_error_code::resource_exhausted,
+                                          "IOCP association table is full"));
+    }
+
+    detail::iocp_completion_key_token key{
+        associations_.size() + 1U,
+        token.generation,
+    };
+    if (auto packed = detail::pack_iocp_completion_key(key); !packed.has_value()) {
+        return std::unexpected(packed.error());
+    }
+
+    associations_.push_back(association_entry{key.association_id, token, true});
+    association_by_native_handle_[token.native_handle] = key.association_id;
+    return key;
+}
+
+void iocp_backend::rollback_association(detail::iocp_completion_key_token key) noexcept {
+    if (key.association_id == 0 || key.association_id > associations_.size()) {
+        return;
+    }
+
+    auto& entry = associations_[key.association_id - 1U];
+    entry.open = false;
+    if (auto found = association_by_native_handle_.find(entry.token.native_handle);
+        found != association_by_native_handle_.end() && found->second == key.association_id) {
+        association_by_native_handle_.erase(found);
+    }
+}
+
+void iocp_backend::close_association(backend_handle_token token) noexcept {
+    auto found = association_by_native_handle_.find(token.native_handle);
+    if (found == association_by_native_handle_.end()) {
+        return;
+    }
+
+    const auto association_id = found->second;
+    if (association_id == 0 || association_id > associations_.size()) {
+        association_by_native_handle_.erase(found);
+        return;
+    }
+
+    auto& entry = associations_[association_id - 1U];
+    if (entry.token == token) {
+        entry.open = false;
+        association_by_native_handle_.erase(found);
+    }
+}
+
+io_result<detail::iocp_completion_key_token> iocp_backend::completion_key_for(
+    backend_handle_token token) const {
+    auto found = association_by_native_handle_.find(token.native_handle);
+    if (found == association_by_native_handle_.end()) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "IOCP handle token has no association"));
+    }
+
+    const auto association_id = found->second;
+    if (association_id == 0 || association_id > associations_.size()) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "IOCP association id is not current"));
+    }
+
+    const auto& entry = associations_[association_id - 1U];
+    if (!entry.open || entry.token != token || !fallback_.is_current_handle(token)) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "IOCP handle token is not current"));
+    }
+
+    return detail::iocp_completion_key_token{association_id, token.generation};
+}
+
+std::optional<backend_handle_token> iocp_backend::current_handle_for(
+    detail::iocp_completion_key_token key) const noexcept {
+    if (key.association_id == 0 || key.association_id > associations_.size()) {
+        return std::nullopt;
+    }
+
+    const auto& entry = associations_[key.association_id - 1U];
+    if (!entry.open || entry.token.generation != key.generation ||
+        !fallback_.is_current_handle(entry.token)) {
+        return std::nullopt;
+    }
+    return entry.token;
+}
+
+io_result<detail::iocp_completion_key_token> detail::iocp_completion_key_for(
+    const iocp_backend& backend,
+    backend_handle_token token) {
+    return backend.completion_key_for(token);
+}
+
+std::size_t detail::iocp_native_packet_count(const iocp_backend& backend) noexcept {
+    return backend.native_packets_.size();
+}
+
+io_result<std::size_t> detail::drain_iocp_native_packets(
+    iocp_backend& backend,
+    std::span<iocp_native_completion_packet> out) {
+    if (out.empty()) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "native packet drain output must not be empty"));
+    }
+
+    const auto count = std::min(out.size(), backend.native_packets_.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        out[index] = backend.native_packets_.front();
+        backend.native_packets_.pop_front();
+    }
+    return count;
+}
+
 #if defined(_WIN32)
 void iocp_backend::close_owned_port() noexcept {
     if (completion_port_ != nullptr) {
@@ -75,12 +204,43 @@ void_result iocp_backend::initialization_result() const {
     return {};
 }
 
+void_result detail::post_iocp_test_packet(iocp_backend& backend,
+                                          iocp_completion_key_token key,
+                                          std::size_t bytes_transferred,
+                                          void* overlapped) {
+    if (backend.stopped_) {
+        return closed_error();
+    }
+    if (auto initialized = backend.initialization_result(); !initialized.has_value()) {
+        return initialized;
+    }
+
+    auto raw_key = pack_iocp_completion_key(key);
+    if (!raw_key.has_value()) {
+        return std::unexpected(raw_key.error());
+    }
+
+    if (::PostQueuedCompletionStatus(static_cast<HANDLE>(backend.completion_port_),
+                                     static_cast<DWORD>(bytes_transferred),
+                                     static_cast<ULONG_PTR>(*raw_key),
+                                     static_cast<LPOVERLAPPED>(overlapped)) == 0) {
+        return std::unexpected(provider_failure(::GetLastError()));
+    }
+    return {};
+}
+
 io_result<std::size_t> iocp_backend::observe_native_completions() {
     if (completion_port_ == nullptr) {
         return std::unexpected(make_error(vio_error_code::closed));
     }
+    if (native_packets_.size() >= options_.native_packet_capacity) {
+        return std::unexpected(make_error(vio_error_code::resource_exhausted,
+                                          "IOCP native packet queue is full"));
+    }
 
-    std::vector<OVERLAPPED_ENTRY> entries(options_.completion_batch_limit);
+    const auto capacity_remaining = options_.native_packet_capacity - native_packets_.size();
+    const auto batch_limit = std::min(options_.completion_batch_limit, capacity_remaining);
+    std::vector<OVERLAPPED_ENTRY> entries(batch_limit);
     ULONG removed = 0;
     if (::GetQueuedCompletionStatusEx(static_cast<HANDLE>(completion_port_),
                                       entries.data(),
@@ -103,12 +263,13 @@ io_result<std::size_t> iocp_backend::observe_native_completions() {
             continue;
         }
 
-        const auto token = detail::unpack_iocp_completion_key(key);
-        if (token.has_value() && !fallback_.is_current_handle(*token)) {
+        const auto completion_key = detail::unpack_iocp_completion_key(key);
+        if (!completion_key.has_value()) {
             ++observed;
             continue;
         }
-        if (!token.has_value()) {
+        const auto handle = current_handle_for(*completion_key);
+        if (!handle.has_value()) {
             ++observed;
             continue;
         }
@@ -117,13 +278,22 @@ io_result<std::size_t> iocp_backend::observe_native_completions() {
         // only preserves the native packet and proves stale generation handling.
         native_packets_.push_back(detail::iocp_native_completion_packet{
             static_cast<std::size_t>(entry.dwNumberOfBytesTransferred),
+            *completion_key,
             key,
+            *handle,
             entry.lpOverlapped,
             static_cast<std::uintptr_t>(entry.Internal),
         });
         ++observed;
     }
     return observed;
+}
+#else
+void_result detail::post_iocp_test_packet(iocp_backend&,
+                                          iocp_completion_key_token,
+                                          std::size_t,
+                                          void*) {
+    return std::unexpected(unsupported_error());
 }
 #endif
 
@@ -141,8 +311,15 @@ io_result<backend_handle_token> iocp_backend::register_handle(std::size_t native
         return token;
     }
 
-    auto completion_key = detail::pack_iocp_completion_key(*token);
+    auto association_key = create_association(*token);
+    if (!association_key.has_value()) {
+        (void)fallback_.close_handle(*token);
+        return std::unexpected(association_key.error());
+    }
+
+    auto completion_key = detail::pack_iocp_completion_key(*association_key);
     if (!completion_key.has_value()) {
+        rollback_association(*association_key);
         (void)fallback_.close_handle(*token);
         return std::unexpected(completion_key.error());
     }
@@ -153,6 +330,7 @@ io_result<backend_handle_token> iocp_backend::register_handle(std::size_t native
         static_cast<ULONG_PTR>(*completion_key), 0);
     if (associated == nullptr) {
         const DWORD provider_code = ::GetLastError();
+        rollback_association(*association_key);
         (void)fallback_.close_handle(*token);
         return std::unexpected(provider_failure(provider_code));
     }
@@ -203,7 +381,12 @@ void_result iocp_backend::close_handle(backend_handle_token token) {
     if (auto initialized = initialization_result(); !initialized.has_value()) {
         return initialized;
     }
-    return fallback_.close_handle(token);
+    auto closed = fallback_.close_handle(token);
+    if (!closed.has_value()) {
+        return closed;
+    }
+    close_association(token);
+    return {};
 #else
     (void)token;
     return std::unexpected(unsupported_error());
@@ -272,7 +455,11 @@ void_result iocp_backend::shutdown() {
 
     stopped_ = true;
     auto drained = fallback_.shutdown();
+    // Shutdown closes the owned IOCP port; native packets that were not mapped
+    // before teardown cannot be completed later and are discarded explicitly.
     native_packets_.clear();
+    association_by_native_handle_.clear();
+    associations_.clear();
     close_owned_port();
     return drained;
 #else

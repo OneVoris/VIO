@@ -6,14 +6,14 @@
 #include <deque>
 #include <limits>
 #include <optional>
+#include <unordered_map>
+#include <vector>
 
 #include <voris/io/backend.hpp>
 
 namespace voris::io::backends {
 
-struct iocp_backend_options {
-    std::size_t completion_batch_limit{32};
-};
+class iocp_backend;
 
 struct overlapped_operation_lifetime {
     bool submitted{};
@@ -34,10 +34,22 @@ inline constexpr std::uintptr_t iocp_completion_key_low_mask =
     (std::uintptr_t{1} << iocp_completion_key_generation_shift) - 1U;
 inline constexpr std::uintptr_t iocp_wake_completion_key =
     std::numeric_limits<std::uintptr_t>::max();
+inline constexpr std::size_t iocp_default_completion_batch_limit = 32U;
+inline constexpr std::size_t iocp_max_completion_batch_limit = 256U;
+inline constexpr std::size_t iocp_max_native_packet_capacity = 1024U;
+inline constexpr std::size_t iocp_max_association_count =
+    iocp_completion_key_low_mask < 32768U ? iocp_completion_key_low_mask : 32768U;
+
+struct iocp_completion_key_token {
+    std::size_t association_id{};
+    std::size_t generation{};
+};
 
 struct iocp_native_completion_packet {
     std::size_t bytes_transferred{};
-    std::uintptr_t completion_key{};
+    iocp_completion_key_token completion_key{};
+    std::uintptr_t raw_completion_key{};
+    backend_handle_token handle{};
     void* overlapped{};
     std::uintptr_t internal_status{};
 };
@@ -47,18 +59,18 @@ struct iocp_native_completion_packet {
 }
 
 [[nodiscard]] inline io_result<std::uintptr_t> pack_iocp_completion_key(
-    backend_handle_token token) {
-    if (token.native_handle == 0 || token.generation == 0 ||
-        token.native_handle > iocp_completion_key_low_mask ||
+    iocp_completion_key_token token) {
+    if (token.association_id == 0 || token.generation == 0 ||
+        token.association_id > iocp_completion_key_low_mask ||
         token.generation > iocp_completion_key_low_mask) {
         return std::unexpected(make_error(vio_error_code::invalid_state,
-                                          "IOCP completion key cannot encode handle token"));
+                                          "IOCP completion key cannot encode association token"));
     }
 
     const auto key =
         (static_cast<std::uintptr_t>(token.generation)
          << iocp_completion_key_generation_shift) |
-        static_cast<std::uintptr_t>(token.native_handle);
+        static_cast<std::uintptr_t>(token.association_id);
     if (is_iocp_wake_completion_key(key)) {
         return std::unexpected(make_error(vio_error_code::invalid_state,
                                           "IOCP completion key conflicts with wake sentinel"));
@@ -66,25 +78,43 @@ struct iocp_native_completion_packet {
     return key;
 }
 
-[[nodiscard]] inline io_result<backend_handle_token> unpack_iocp_completion_key(
+[[nodiscard]] inline io_result<iocp_completion_key_token> unpack_iocp_completion_key(
     std::uintptr_t key) {
     if (is_iocp_wake_completion_key(key)) {
         return std::unexpected(make_error(vio_error_code::invalid_state,
-                                          "IOCP wake sentinel is not a handle token"));
+                                          "IOCP wake sentinel is not an association token"));
     }
 
-    backend_handle_token token{
+    iocp_completion_key_token token{
         static_cast<std::size_t>(key & iocp_completion_key_low_mask),
         static_cast<std::size_t>(key >> iocp_completion_key_generation_shift),
     };
-    if (token.native_handle == 0 || token.generation == 0) {
+    if (token.association_id == 0 || token.generation == 0) {
         return std::unexpected(make_error(vio_error_code::invalid_state,
-                                          "IOCP completion key is not a handle token"));
+                                          "IOCP completion key is not an association token"));
     }
     return token;
 }
 
+[[nodiscard]] io_result<iocp_completion_key_token> iocp_completion_key_for(
+    const iocp_backend& backend,
+    backend_handle_token token);
+[[nodiscard]] void_result post_iocp_test_packet(iocp_backend& backend,
+                                                iocp_completion_key_token key,
+                                                std::size_t bytes_transferred,
+                                                void* overlapped);
+[[nodiscard]] std::size_t iocp_native_packet_count(const iocp_backend& backend) noexcept;
+[[nodiscard]] io_result<std::size_t> drain_iocp_native_packets(
+    iocp_backend& backend,
+    std::span<iocp_native_completion_packet> out);
+
 } // namespace detail
+
+struct iocp_backend_options {
+    std::size_t completion_batch_limit{detail::iocp_default_completion_batch_limit};
+    // Zero means "match the normalized completion batch limit".
+    std::size_t native_packet_capacity{};
+};
 
 class iocp_backend final : public backend {
 public:
@@ -95,6 +125,7 @@ public:
     iocp_backend& operator=(const iocp_backend&) = delete;
 
     [[nodiscard]] std::size_t completion_batch_limit() const noexcept;
+    [[nodiscard]] std::size_t native_packet_capacity() const noexcept;
 
     [[nodiscard]] io_result<backend_handle_token> register_handle(
         std::size_t native_handle) override;
@@ -109,6 +140,34 @@ public:
     [[nodiscard]] void_result shutdown() override;
 
 private:
+    friend io_result<detail::iocp_completion_key_token> detail::iocp_completion_key_for(
+        const iocp_backend& backend,
+        backend_handle_token token);
+    friend void_result detail::post_iocp_test_packet(iocp_backend& backend,
+                                                     detail::iocp_completion_key_token key,
+                                                     std::size_t bytes_transferred,
+                                                     void* overlapped);
+    friend std::size_t detail::iocp_native_packet_count(
+        const iocp_backend& backend) noexcept;
+    friend io_result<std::size_t> detail::drain_iocp_native_packets(
+        iocp_backend& backend,
+        std::span<detail::iocp_native_completion_packet> out);
+
+    struct association_entry {
+        std::size_t id{};
+        backend_handle_token token{};
+        bool open{};
+    };
+
+    [[nodiscard]] io_result<detail::iocp_completion_key_token> create_association(
+        backend_handle_token token);
+    void rollback_association(detail::iocp_completion_key_token key) noexcept;
+    void close_association(backend_handle_token token) noexcept;
+    [[nodiscard]] io_result<detail::iocp_completion_key_token> completion_key_for(
+        backend_handle_token token) const;
+    [[nodiscard]] std::optional<backend_handle_token> current_handle_for(
+        detail::iocp_completion_key_token key) const noexcept;
+
 #if defined(_WIN32)
     void close_owned_port() noexcept;
     [[nodiscard]] void_result initialization_result() const;
@@ -118,6 +177,8 @@ private:
     iocp_backend_options options_;
     virtual_backend fallback_;
     std::deque<detail::iocp_native_completion_packet> native_packets_{};
+    std::vector<association_entry> associations_{};
+    std::unordered_map<std::size_t, std::size_t> association_by_native_handle_{};
     void* completion_port_{};
     bool stopped_{false};
     std::optional<vio_error> initialization_error_{};
