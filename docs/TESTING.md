@@ -93,7 +93,32 @@ release validation notes.
 
 ## Benchmark Record
 
-Every reported result includes commit, compiler, standard library, flags, CPU, operating system/kernel, workload, throughput, latency percentiles, peak RSS, allocations per operation, and errors/timeouts. A single RPS number is not a release argument.
+Every reported result includes commit, compiler, standard library, flags, CPU,
+operating system/kernel, workload, throughput, latency percentiles, peak RSS,
+allocations per operation, and errors/timeouts. A single RPS number is not a
+release argument.
+
+VIO benchmark binaries emit stable key=value records. Required fields are:
+
+```text
+benchmark environment platform workload result reason operations elapsed_ns throughput_ops_per_sec p50_ns p95_ns p99_ns peak_rss_bytes allocations_per_operation errors timeouts
+```
+
+The `result` field is `ok`, `failed`, or `skipped`. Unsupported provider or
+host combinations use `result=skipped`, a machine-readable `reason`, zero
+operations when no workload ran, and process exit 0. A failed workload uses
+`result=failed`, increments `errors` or `timeouts`, and exits non-zero.
+
+Benchmarks use `unknown` for required measurements that are unavailable on the
+current host or would require intrusive instrumentation, such as
+`allocations_per_operation` before an approved allocation counter exists. They
+use `0` for counted events that did not happen. Required fields must not be
+omitted from successful, failed, or skipped records.
+
+Release benchmark evidence must include the exact build commands, commit hash,
+dirty/clean status, OS/kernel, CPU, compiler, build mode, VXrepo registration,
+`xrepo info voris-vmem`, and the complete emitted record lines from scheduler
+hops, task spawn, timers, channels, and socket ping-pong.
 
 ## Completion Rule
 

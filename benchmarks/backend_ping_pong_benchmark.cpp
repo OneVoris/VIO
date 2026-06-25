@@ -1,5 +1,7 @@
 #include <voris/io/backends/io_uring_backend.hpp>
 
+#include "benchmark_support.hpp"
+
 #include <iostream>
 
 #if defined(__linux__)
@@ -24,34 +26,26 @@ namespace {
 
 constexpr std::string_view workload = "socketpair_ping_pong";
 
-[[nodiscard]] const char* platform_name() noexcept {
-#if defined(__linux__)
-    return "linux";
-#elif defined(_WIN32)
-    return "windows";
-#elif defined(__APPLE__)
-    return "darwin";
-#else
-    return "other";
-#endif
-}
-
 void emit_record(std::string_view backend,
                  std::string_view result,
                  std::string_view reason,
                  std::size_t rounds,
                  std::size_t operations,
                  std::int64_t elapsed_ns) {
-    std::cout << "benchmark=backend_ping_pong"
-              << " environment=" << platform_name()
-              << " platform=" << platform_name()
-              << " workload=" << workload
-              << " backend=" << backend
-              << " result=" << result
-              << " reason=" << reason
-              << " rounds=" << rounds
-              << " operations=" << operations
-              << " elapsed_ns=" << elapsed_ns << '\n';
+    const bool failed = result == "failed";
+    const bool timeout = reason.find("timeout") != std::string_view::npos;
+    vio_bench::record record{
+        .benchmark = "backend_ping_pong",
+        .workload = workload,
+        .result = result,
+        .reason = reason,
+        .operations = operations,
+        .elapsed_ns = elapsed_ns,
+        .errors = failed ? 1U : 0U,
+        .timeouts = timeout ? 1U : 0U,
+        .extra = {{"backend", std::string(backend)},
+                  {"rounds", std::to_string(rounds)}}};
+    vio_bench::emit(record);
 }
 
 #if defined(__linux__)
