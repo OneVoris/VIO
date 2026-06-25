@@ -101,6 +101,15 @@ void shard::run_queued_message(detail::mailbox::message message) {
     const auto run_started = detail::mailbox::clock::now();
     const auto lag =
         std::chrono::duration_cast<std::chrono::nanoseconds>(run_started - message.enqueued_at);
+
+    {
+        std::lock_guard lock(metrics_mutex_);
+        metrics_.queue_depth = mailbox_.size();
+        if (metrics_.scheduler_lag < lag) {
+            metrics_.scheduler_lag = lag;
+        }
+    }
+
     std::chrono::nanoseconds task_duration{};
     if (message.work) {
         const auto task_started = detail::mailbox::clock::now();
@@ -112,10 +121,6 @@ void shard::run_queued_message(detail::mailbox::message message) {
     {
         std::lock_guard lock(metrics_mutex_);
         ++metrics_.completed_tasks;
-        metrics_.queue_depth = mailbox_.size();
-        if (metrics_.scheduler_lag < lag) {
-            metrics_.scheduler_lag = lag;
-        }
         if (task_duration > metrics_config_.long_task_threshold) {
             ++metrics_.long_tasks;
         }

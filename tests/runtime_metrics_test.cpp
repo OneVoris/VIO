@@ -3,6 +3,8 @@
 #include "test_assert.hpp"
 
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <vector>
 #include <thread>
 
@@ -64,6 +66,50 @@ int main() {
     runtime_metrics after_long_task = measured.metrics();
     assert(after_long_task.long_tasks == 1);
     assert(after_long_task.scheduler_lag >= 0ns);
+
+    shard blocked(4);
+    std::mutex mutex;
+    std::condition_variable started;
+    std::condition_variable release;
+    bool continuation_started = false;
+    bool continuation_released = false;
+    std::size_t drained = 0;
+
+    assert(blocked.submit([&] {
+                      {
+                          std::lock_guard lock(mutex);
+                          continuation_started = true;
+                      }
+                      started.notify_one();
+
+                      std::unique_lock lock(mutex);
+                      assert(release.wait_for(lock, 2s, [&] { return continuation_released; }));
+                  })
+               .has_value());
+    std::this_thread::sleep_for(25ms);
+
+    std::thread driver([&] { drained = blocked.drain(); });
+
+    {
+        std::unique_lock lock(mutex);
+        assert(started.wait_for(lock, 2s, [&] { return continuation_started; }));
+    }
+
+    runtime_metrics while_running = blocked.metrics();
+    assert(while_running.queue_depth == 0);
+    assert(while_running.scheduler_lag >= 10ms);
+    assert(while_running.completed_tasks == 0);
+
+    {
+        std::lock_guard lock(mutex);
+        continuation_released = true;
+    }
+    release.notify_one();
+    driver.join();
+    assert(drained == 1);
+    runtime_metrics after_blocked = blocked.metrics();
+    assert(after_blocked.completed_tasks == 1);
+    assert(after_blocked.queue_depth == 0);
 
     return 0;
 }

@@ -8,6 +8,12 @@
 #include <voris/io/loop_budget.hpp>
 #include <voris/io/scheduler.hpp>
 
+namespace voris::io {
+
+class shard;
+
+} // namespace voris::io
+
 namespace voris::io::detail {
 
 class mailbox {
@@ -29,14 +35,6 @@ public:
 
     [[nodiscard]] void_result submit_system(continuation message) {
         return system_queue_.try_push(make_message(std::move(message)));
-    }
-
-    [[nodiscard]] std::optional<message> pop_next() {
-        auto next = system_queue_.pop();
-        if (!next.has_value()) {
-            next = queue_.pop();
-        }
-        return next;
     }
 
     [[nodiscard]] bool run_one() {
@@ -92,6 +90,18 @@ public:
     }
 
 private:
+    friend class ::voris::io::shard;
+
+    // Transfers unexecuted work to the shard so it can publish instrumentation before
+    // running user code; callers must not execute the work while holding internal locks.
+    [[nodiscard]] std::optional<message> pop_next() {
+        auto next = system_queue_.pop();
+        if (!next.has_value()) {
+            next = queue_.pop();
+        }
+        return next;
+    }
+
     [[nodiscard]] static message make_message(continuation work) {
         return message{.work = std::move(work), .enqueued_at = clock::now()};
     }
