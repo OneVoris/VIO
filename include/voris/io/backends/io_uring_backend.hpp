@@ -59,6 +59,9 @@ void discard_submitted_io_uring_submissions(
 [[nodiscard]] std::vector<pending_io_uring_submission>
 take_unsubmitted_io_uring_submissions(
     std::deque<pending_io_uring_submission>& pending);
+[[nodiscard]] bool io_uring_cancel_retry_required(
+    bool close_requested,
+    bool cancel_submitted) noexcept;
 
 } // namespace detail
 
@@ -112,6 +115,7 @@ private:
         std::size_t operation_id,
         kernel_operation& operation);
     [[nodiscard]] io_result<std::size_t> progress_kernel_submissions();
+    [[nodiscard]] io_result<std::size_t> retry_missing_kernel_cancellations();
     std::size_t complete_unsubmitted_kernel_submissions(const vio_error& error);
     [[nodiscard]] io_result<std::size_t> flush_submission_batch();
     [[nodiscard]] io_result<std::size_t> observe_completion_batch();

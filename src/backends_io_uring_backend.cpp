@@ -288,6 +288,11 @@ std::vector<pending_io_uring_submission> take_unsubmitted_io_uring_submissions(
     return unsubmitted;
 }
 
+bool io_uring_cancel_retry_required(bool close_requested,
+                                    bool cancel_submitted) noexcept {
+    return close_requested && !cancel_submitted;
+}
+
 } // namespace detail
 
 io_uring_capabilities detect_io_uring_capabilities() noexcept {
@@ -1063,6 +1068,35 @@ io_result<std::size_t> io_uring_backend::progress_kernel_submissions() {
 #endif
 }
 
+io_result<std::size_t> io_uring_backend::retry_missing_kernel_cancellations() {
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
+    std::size_t visible = 0;
+    for (auto& [operation_id, operation] : kernel_operations_) {
+        // A failed enter can prove an internal cancel SQE was never submitted.
+        // Keep the close/shutdown intent and retry once per poll until either
+        // the cancel is submitted or the original operation CQE arrives.
+        if (!detail::io_uring_cancel_retry_required(operation.close_requested,
+                                                    operation.cancel_submitted)) {
+            continue;
+        }
+
+        auto retried = request_kernel_cancellation_for(operation_id, operation);
+        if (!retried.has_value()) {
+            return std::unexpected(retried.error());
+        }
+
+        auto progressed = progress_kernel_submissions();
+        if (!progressed.has_value()) {
+            return std::unexpected(progressed.error());
+        }
+        visible += *progressed;
+    }
+    return visible;
+#else
+    return 0U;
+#endif
+}
+
 std::size_t io_uring_backend::complete_unsubmitted_kernel_submissions(
     const vio_error& error) {
     const auto unsubmitted =
@@ -1138,10 +1172,14 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
     if (!progressed.has_value()) {
         return std::unexpected(progressed.error());
     }
+    auto retried = retry_missing_kernel_cancellations();
+    if (!retried.has_value()) {
+        return std::unexpected(retried.error());
+    }
 
     std::vector<io_uring_cqe> batch(options_.completion_batch_limit);
     const std::size_t count = kernel_ring_->drain_cqes(batch);
-    std::size_t visible = *progressed;
+    std::size_t visible = *progressed + *retried;
     for (std::size_t index = 0; index < count; ++index) {
         const auto& cqe = batch[index];
         const auto decoded = decode_kernel_user_data(cqe.user_data);

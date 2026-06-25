@@ -1198,6 +1198,17 @@ void test_pending_submission_failure_resolves_only_unsubmitted_tail() {
     assert(failed[1].operation_id == 202);
 }
 
+void test_close_requested_operation_requires_cancel_retry_after_unsubmitted_cancel() {
+    assert(!voris::io::backends::detail::io_uring_cancel_retry_required(false,
+                                                                        false));
+    assert(!voris::io::backends::detail::io_uring_cancel_retry_required(false,
+                                                                        true));
+    assert(!voris::io::backends::detail::io_uring_cancel_retry_required(true,
+                                                                        true));
+    assert(voris::io::backends::detail::io_uring_cancel_retry_required(true,
+                                                                       false));
+}
+
 void test_poll_flushes_submissions_in_batches() {
     voris::io::backends::io_uring_backend backend(
         core_capabilities(), deterministic_options(8, 2, 8));
@@ -1514,6 +1525,7 @@ int main() {
     test_kernel_submission_requires_cancel_capability_for_close_liveness();
     test_kernel_submit_rejects_invalid_payloads_immediately();
     test_pending_submission_failure_resolves_only_unsubmitted_tail();
+    test_close_requested_operation_requires_cancel_retry_after_unsubmitted_cancel();
     test_poll_flushes_submissions_in_batches();
     test_socket_operations_flow_through_submission_batches_and_close_fifo();
     test_poll_observes_completions_in_batches_and_drain_preserves_order();
