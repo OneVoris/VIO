@@ -3,6 +3,7 @@
 #include <voris/io/backend.hpp>
 #include <voris/io/backends/epoll_backend.hpp>
 #include <voris/io/backends/io_uring_backend.hpp>
+#include <voris/io/backends/kqueue_backend.hpp>
 
 #include <array>
 #include <cstddef>
@@ -14,6 +15,11 @@
 
 #if defined(__linux__)
 #include <sys/eventfd.h>
+#include <unistd.h>
+#endif
+
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -208,6 +214,112 @@ private:
     }
 
     std::vector<unique_fd> handles_{};
+};
+#endif
+
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+class kqueue_unique_fd {
+public:
+    explicit kqueue_unique_fd(int fd = -1) noexcept : fd_(fd) {}
+
+    ~kqueue_unique_fd() {
+        reset();
+    }
+
+    kqueue_unique_fd(const kqueue_unique_fd&) = delete;
+    kqueue_unique_fd& operator=(const kqueue_unique_fd&) = delete;
+
+    kqueue_unique_fd(kqueue_unique_fd&& other) noexcept : fd_(other.release()) {}
+
+    kqueue_unique_fd& operator=(kqueue_unique_fd&& other) noexcept {
+        if (this != &other) {
+            reset(other.release());
+        }
+        return *this;
+    }
+
+    [[nodiscard]] int get() const noexcept {
+        return fd_;
+    }
+
+    [[nodiscard]] int release() noexcept {
+        const int fd = fd_;
+        fd_ = -1;
+        return fd;
+    }
+
+    void reset(int fd = -1) noexcept {
+        if (fd_ >= 0) {
+            (void)::close(fd_);
+        }
+        fd_ = fd;
+    }
+
+private:
+    int fd_{-1};
+};
+
+struct kqueue_socket_pair {
+    kqueue_unique_fd first{};
+    kqueue_unique_fd second{};
+};
+
+inline kqueue_socket_pair make_kqueue_socket_pair() {
+    int sockets[2]{-1, -1};
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    return kqueue_socket_pair{kqueue_unique_fd{sockets[0]}, kqueue_unique_fd{sockets[1]}};
+}
+
+class kqueue_contract_fixture {
+public:
+    [[nodiscard]] std::size_t make_native_handle() {
+        handles_.push_back(make_kqueue_socket_pair());
+        return static_cast<std::size_t>(handles_.back().first.get());
+    }
+
+    [[nodiscard]] std::size_t invalid_native_handle() const noexcept {
+        return 0;
+    }
+
+    [[nodiscard]] std::size_t recreate_native_handle_with_same_number(
+        std::size_t native_handle) {
+        close_native_handle(native_handle);
+
+        auto replacement = make_kqueue_socket_pair();
+        const auto target = static_cast<int>(native_handle);
+        if (replacement.first.get() != target) {
+            const int duplicate = ::dup2(replacement.first.get(), target);
+            assert(duplicate == target);
+            replacement.first.reset();
+            replacement.first.reset(duplicate);
+        }
+
+        handles_.push_back(std::move(replacement));
+        return native_handle;
+    }
+
+    [[nodiscard]] std::size_t expected_poll_count_after_close(
+        std::size_t) const noexcept {
+        return 0;
+    }
+
+    void make_pending_completions_visible() noexcept {}
+
+    voris::io::backends::kqueue_backend backend{};
+
+private:
+    void close_native_handle(std::size_t native_handle) noexcept {
+        for (auto& handle : handles_) {
+            if (handle.first.get() == static_cast<int>(native_handle)) {
+                handle.first.reset();
+                handle.second.reset();
+                return;
+            }
+        }
+        assert(false);
+    }
+
+    std::vector<kqueue_socket_pair> handles_{};
 };
 #endif
 
@@ -517,6 +629,26 @@ inline void run_epoll_backend_contract_suite() {
     using namespace voris::io;
 
     backends::epoll_backend backend;
+    assert_token_error(backend.register_handle(1), vio_error_code::unsupported);
+    assert_void_error(backend.submit(operation(1, backend_operation_kind::read, {1, 1})),
+                      vio_error_code::unsupported);
+    assert_void_error(backend.cancel(1, cancellation_reason::manual), vio_error_code::unsupported);
+    assert_void_error(backend.close_handle({1, 1}), vio_error_code::unsupported);
+    assert_size_error(backend.poll(), vio_error_code::unsupported);
+    std::array<backend_completion, 1> completions{};
+    assert_size_error(backend.drain_completions(completions), vio_error_code::unsupported);
+    assert_void_error(backend.wake(), vio_error_code::unsupported);
+    assert(backend.shutdown().has_value());
+#endif
+}
+
+inline void run_kqueue_backend_contract_suite() {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    run_backend_contract_suite<kqueue_contract_fixture>();
+#else
+    using namespace voris::io;
+
+    backends::kqueue_backend backend;
     assert_token_error(backend.register_handle(1), vio_error_code::unsupported);
     assert_void_error(backend.submit(operation(1, backend_operation_kind::read, {1, 1})),
                       vio_error_code::unsupported);
