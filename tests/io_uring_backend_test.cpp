@@ -1075,6 +1075,10 @@ void test_linux_real_io_uring_registered_buffers_lifecycle_when_supported() {
 
     auto registered = backend.register_buffers(buffers);
     if (!registered.has_value()) {
+        assert(registered.error().classification ==
+               voris::io::vio_error_code::backend_failure);
+        assert(backend.registered_buffer_count() == 0);
+        assert(backend.shutdown().has_value());
         return;
     }
 
@@ -1102,6 +1106,10 @@ void test_linux_real_io_uring_registered_files_lifecycle_when_supported() {
 
     auto registered = backend.register_files(files);
     if (!registered.has_value()) {
+        assert(registered.error().classification ==
+               voris::io::vio_error_code::backend_failure);
+        assert(backend.registered_file_count() == 0);
+        assert(backend.shutdown().has_value());
         return;
     }
 
@@ -1601,6 +1609,41 @@ void test_registered_resources_shutdown_and_destructor_cleanup() {
 
     assert(kernel.unregister_buffers_calls == 1);
     assert(kernel.unregister_files_calls == 1);
+}
+
+void test_registered_resource_provider_failures_do_not_publish_state() {
+    auto caps = registered_resource_capabilities();
+    voris::io::backends::io_uring_backend backend(caps, test_kernel_options());
+    voris::io::backends::detail::io_uring_test_kernel kernel{};
+    attach_test_kernel(backend, kernel);
+
+    std::array<std::byte, 16> storage{};
+    const std::array buffers{
+        voris::io::backends::io_uring_registered_buffer{
+            .bytes = std::span<std::byte>{storage}},
+    };
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+    const std::array files{*token};
+
+    kernel.register_buffers_provider_failures = 1;
+    assert_void_error(backend.register_buffers(buffers),
+                      voris::io::vio_error_code::backend_failure);
+    assert(backend.registered_buffer_count() == 0);
+    assert(kernel.unregister_buffers_calls == 0);
+    assert(backend.register_buffers(buffers).has_value());
+    assert(backend.registered_buffer_count() == 1);
+    assert(backend.unregister_buffers().has_value());
+
+    kernel.register_files_provider_failures = 1;
+    assert_void_error(backend.register_files(files),
+                      voris::io::vio_error_code::backend_failure);
+    assert(backend.registered_file_count() == 0);
+    assert(kernel.unregister_files_calls == 0);
+    assert(backend.register_files(files).has_value());
+    assert(backend.registered_file_count() == 1);
+
+    assert(backend.shutdown().has_value());
 }
 
 void test_registered_resources_do_not_change_default_submit_mode() {
@@ -2607,6 +2650,7 @@ int main() {
     test_registered_resource_lifecycle_rejects_duplicates_and_reregisters();
     test_registered_files_are_released_when_registered_handle_closes();
     test_registered_resources_shutdown_and_destructor_cleanup();
+    test_registered_resource_provider_failures_do_not_publish_state();
     test_registered_resources_do_not_change_default_submit_mode();
     test_lifecycle_state_tracks_availability_and_shutdown();
     test_empty_completion_drain_is_invalid_state();

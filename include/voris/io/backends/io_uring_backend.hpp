@@ -38,8 +38,9 @@ struct io_uring_backend_options {
 };
 
 struct io_uring_registered_buffer {
-    // Borrowed storage. The caller keeps the memory alive until explicit
-    // unregister, shutdown, or backend destruction releases the registration.
+    // VIO does not own this storage. Kernel registration may pin or map it
+    // until explicit unregister, shutdown, or ring teardown, so the caller must
+    // keep the memory alive for the whole registration lifetime.
     std::span<std::byte> bytes{};
 };
 
@@ -95,6 +96,8 @@ struct io_uring_test_kernel {
     std::size_t unregister_buffers_calls{};
     std::size_t register_files_calls{};
     std::size_t unregister_files_calls{};
+    std::size_t register_buffers_provider_failures{};
+    std::size_t register_files_provider_failures{};
 };
 
 void discard_submitted_io_uring_submissions(

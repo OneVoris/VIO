@@ -860,24 +860,28 @@ void_result io_uring_backend::register_buffers(
         return std::unexpected(invalid_state_error(
             "io_uring buffers are already registered"));
     }
-    if (auto count = count_as_u32(buffers.size(),
-                                  "io_uring registered buffer count does not fit u32");
-        !count.has_value()) {
+    const auto count = count_as_u32(buffers.size(),
+                                    "io_uring registered buffer count does not fit u32");
+    if (!count.has_value()) {
         return std::unexpected(count.error());
     }
+
+    std::vector<io_uring_registered_buffer> candidate_buffers{};
+    candidate_buffers.reserve(buffers.size());
     for (const auto& buffer : buffers) {
         if (buffer.bytes.empty() || buffer.bytes.data() == nullptr) {
             return std::unexpected(invalid_state_error(
                 "io_uring registered buffers must reference non-empty storage"));
         }
+        candidate_buffers.push_back(buffer);
     }
 
-    if (auto registered = register_buffers_with_provider(buffers);
+    if (auto registered = register_buffers_with_provider(candidate_buffers);
         !registered.has_value()) {
         return registered;
     }
 
-    registered_buffers_.assign(buffers.begin(), buffers.end());
+    registered_buffers_.swap(candidate_buffers);
     return {};
 }
 
@@ -935,12 +939,14 @@ void_result io_uring_backend::register_files(
         return std::unexpected(invalid_state_error(
             "io_uring files are already registered"));
     }
-    if (auto count = count_as_u32(files.size(),
-                                  "io_uring registered file count does not fit u32");
-        !count.has_value()) {
+    const auto count = count_as_u32(files.size(),
+                                    "io_uring registered file count does not fit u32");
+    if (!count.has_value()) {
         return std::unexpected(count.error());
     }
 
+    std::vector<backend_handle_token> candidate_files{};
+    candidate_files.reserve(files.size());
     for (std::size_t index = 0; index < files.size(); ++index) {
         if (!fallback_.is_current_handle(files[index])) {
             return std::unexpected(invalid_state_error(
@@ -950,20 +956,21 @@ void_result io_uring_backend::register_files(
             !fd.has_value()) {
             return std::unexpected(fd.error());
         }
-        for (std::size_t previous = 0; previous < index; ++previous) {
-            if (files[previous] == files[index]) {
+        for (const auto previous : candidate_files) {
+            if (previous == files[index]) {
                 return std::unexpected(invalid_state_error(
                     "io_uring registered file tokens must be unique"));
             }
         }
+        candidate_files.push_back(files[index]);
     }
 
-    if (auto registered = register_files_with_provider(files);
+    if (auto registered = register_files_with_provider(candidate_files);
         !registered.has_value()) {
         return registered;
     }
 
-    registered_files_.assign(files.begin(), files.end());
+    registered_files_.swap(candidate_files);
     return {};
 }
 
@@ -1085,6 +1092,10 @@ void_result io_uring_backend::register_buffers_with_provider(
     }
     if (use_test_kernel_submission()) {
         ++test_kernel_->register_buffers_calls;
+        if (test_kernel_->register_buffers_provider_failures != 0U) {
+            --test_kernel_->register_buffers_provider_failures;
+            return std::unexpected(provider_failure(EIO));
+        }
         return {};
     }
 
@@ -1157,6 +1168,10 @@ void_result io_uring_backend::register_files_with_provider(
     }
     if (use_test_kernel_submission()) {
         ++test_kernel_->register_files_calls;
+        if (test_kernel_->register_files_provider_failures != 0U) {
+            --test_kernel_->register_files_provider_failures;
+            return std::unexpected(provider_failure(EIO));
+        }
         return {};
     }
 
