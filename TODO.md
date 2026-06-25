@@ -34,7 +34,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M2-005** Implement per-loop task, completion, and time budgets.
 - [x] **VIO-M2-006** Implement scheduler-lag, queue-depth, and long-task counters.
 - [x] **VIO-M2-007** Implement the runtime builder for shard count, CPU affinity, and queue limits.
-- [ ] **VIO-M2-008** Implement an optional bounded compute executor.
+- [x] **VIO-M2-008** Implement an optional bounded compute executor.
 - [ ] **VIO-M2-009** Test full mailboxes, shard stop, cross-shard return, and owner destruction.
 
 ## M3 — Timers and Asynchronous Primitives
