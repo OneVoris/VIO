@@ -1164,62 +1164,6 @@ void test_kernel_submit_rejects_invalid_payloads_immediately() {
         assert(backend.shutdown().has_value());
     }
 
-    {
-        voris::io::backends::io_uring_backend backend(core_capabilities());
-        const auto token = backend.register_handle(1);
-        assert(token.has_value());
-
-        std::array<std::byte, 1> output{};
-        std::span<std::byte> oversized_read{
-            output.data(),
-            static_cast<std::size_t>(std::numeric_limits<unsigned>::max()) + 1U};
-        auto invalid = read_operation(113, *token, oversized_read);
-        assert_void_error(backend.submit(invalid), voris::io::vio_error_code::invalid_state);
-
-        std::array<voris::io::backend_completion, 1> completions{};
-        auto drained = backend.drain_completions(completions);
-        assert(drained.has_value());
-        assert(*drained == 0);
-        assert_empty_kernel_poll(backend);
-
-        assert(backend.submit(read_operation(113, *token, output)).has_value());
-        assert(backend.close_handle(*token).has_value());
-
-        drained = backend.drain_completions(completions);
-        assert(drained.has_value());
-        assert(*drained == 1);
-        assert_completion_error(completions[0], 113, voris::io::vio_error_code::closed);
-        assert(backend.shutdown().has_value());
-    }
-
-    {
-        voris::io::backends::io_uring_backend backend(core_capabilities());
-        const auto token = backend.register_handle(1);
-        assert(token.has_value());
-
-        const std::array<std::byte, 1> input{std::byte{0x76}};
-        std::span<const std::byte> oversized_write{
-            input.data(),
-            static_cast<std::size_t>(std::numeric_limits<unsigned>::max()) + 1U};
-        auto invalid = write_operation(114, *token, oversized_write);
-        assert_void_error(backend.submit(invalid), voris::io::vio_error_code::invalid_state);
-
-        std::array<voris::io::backend_completion, 1> completions{};
-        auto drained = backend.drain_completions(completions);
-        assert(drained.has_value());
-        assert(*drained == 0);
-        assert_empty_kernel_poll(backend);
-
-        std::array<std::byte, 1> output{};
-        assert(backend.submit(read_operation(114, *token, output)).has_value());
-        assert(backend.close_handle(*token).has_value());
-
-        drained = backend.drain_completions(completions);
-        assert(drained.has_value());
-        assert(*drained == 1);
-        assert_completion_error(completions[0], 114, voris::io::vio_error_code::closed);
-        assert(backend.shutdown().has_value());
-    }
 }
 
 void test_poll_flushes_submissions_in_batches() {

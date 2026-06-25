@@ -365,23 +365,36 @@ struct io_uring_backend::kernel_ring {
     void publish_sqe(const sqe_reservation& reservation) noexcept {
         (void)reservation.index;
         std::atomic_ref<unsigned>(*sq_tail).store(reservation.next_tail);
+        ++pending_submissions;
     }
 
-    [[nodiscard]] void_result submit_one() {
-        for (;;) {
-            const long submitted = ::syscall(SYS_io_uring_enter, fd, 1U, 0U, 0U, nullptr, 0U);
-            if (submitted == 1) {
-                return {};
-            }
-            if (submitted < 0 && errno == EINTR) {
+    [[nodiscard]] void_result submit_pending() {
+        while (pending_submissions != 0U) {
+            const long submitted =
+                ::syscall(SYS_io_uring_enter, fd, pending_submissions, 0U, 0U,
+                          nullptr, 0U);
+            if (submitted > 0) {
+                const auto submitted_count = static_cast<unsigned>(submitted);
+                pending_submissions =
+                    submitted_count >= pending_submissions
+                        ? 0U
+                        : pending_submissions - submitted_count;
                 continue;
             }
             if (submitted < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
                 return std::unexpected(provider_failure(errno));
             }
             return std::unexpected(make_error(vio_error_code::backend_failure,
-                                              "io_uring submitted fewer SQEs than requested"));
+                                              "io_uring made no submission progress"));
         }
+        return {};
+    }
+
+    [[nodiscard]] unsigned pending_submission_count() const noexcept {
+        return pending_submissions;
     }
 
     [[nodiscard]] std::size_t drain_cqes(std::span<io_uring_cqe> out) {
@@ -420,6 +433,7 @@ struct io_uring_backend::kernel_ring {
     unsigned* cq_ring_mask{nullptr};
     unsigned* cq_ring_entries{nullptr};
     io_uring_cqe* cqes{nullptr};
+    unsigned pending_submissions{0};
 
 private:
     kernel_ring() = default;
@@ -873,10 +887,12 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
     kernel_operations_.emplace(operation.id,
                                io_uring_backend::kernel_operation{.operation = operation});
     kernel_ring_->publish_sqe(*reservation);
-    if (auto submitted = kernel_ring_->submit_one(); !submitted.has_value()) {
-        // After sq_tail is published the SQE may be consumed by this or a later
-        // enter call, so keep operation storage tracked until a CQE or close
-        // cancellation proves the kernel can no longer reference it.
+    if (auto submitted = kernel_ring_->submit_pending(); !submitted.has_value()) {
+        if (kernel_ring_->pending_submission_count() == 0U) {
+            return std::unexpected(submitted.error());
+        }
+        // Published SQEs with uncertain submission state stay tracked and are
+        // retried from later poll/submit paths.
         return {};
     }
     return {};
@@ -948,10 +964,12 @@ void_result io_uring_backend::request_kernel_cancellation_for(
     operation.cancel_submitted = true;
     kernel_cancel_operation_ids_.insert(operation_id);
     kernel_ring_->publish_sqe(*reservation);
-    if (auto submitted = kernel_ring_->submit_one(); !submitted.has_value()) {
-        // A published cancellation SQE may still be consumed later; retain the
-        // cleanup-only cancel token until its CQE arrives or the original CQE
-        // releases the operation.
+    if (auto submitted = kernel_ring_->submit_pending(); !submitted.has_value()) {
+        if (kernel_ring_->pending_submission_count() == 0U) {
+            return std::unexpected(submitted.error());
+        }
+        // A published cancellation SQE with uncertain submission state stays
+        // tracked and is retried from later poll/submit paths.
         return {};
     }
 
@@ -1010,6 +1028,11 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
     if (!kernel_ring_) {
         return 0U;
+    }
+
+    if (auto submitted = kernel_ring_->submit_pending();
+        !submitted.has_value() && kernel_ring_->pending_submission_count() == 0U) {
+        return std::unexpected(submitted.error());
     }
 
     std::vector<io_uring_cqe> batch(options_.completion_batch_limit);
