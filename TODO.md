@@ -64,7 +64,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 ## M5 — Files and Blocking Work
 
-- [ ] **VIO-M5-001** Implement a bounded blocking executor whose full queue returns a resource error.
+- [x] **VIO-M5-001** Implement a bounded blocking executor whose full queue returns a resource error.
 - [ ] **VIO-M5-002** Implement asynchronous file open, close, `read_at`, and `write_at`.
 - [x] **VIO-M5-003** Implement file size, truncate, and allocation-hint operations.
 - [x] **VIO-M5-004** Implement `sync_data` and `sync_all` and document platform durability semantics.

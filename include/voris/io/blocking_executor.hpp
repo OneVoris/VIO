@@ -1,47 +1,36 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 
-#include <voris/io/detail/bounded_queue.hpp>
 #include <voris/io/scheduler.hpp>
 
 namespace voris::io {
 
 class blocking_executor {
 public:
-    explicit blocking_executor(std::size_t queue_limit)
-        : queue_(queue_limit) {}
+    blocking_executor(std::size_t worker_count, std::size_t queue_limit);
+    explicit blocking_executor(std::size_t queue_limit);
+    ~blocking_executor();
 
-    [[nodiscard]] void_result submit(continuation work) {
-        return queue_.try_push(std::move(work));
-    }
+    blocking_executor(const blocking_executor&) = delete;
+    blocking_executor& operator=(const blocking_executor&) = delete;
 
-    [[nodiscard]] std::size_t drain() {
-        std::size_t ran = 0;
-        while (auto work = queue_.pop()) {
-            if (*work) {
-                (*work)();
-            }
-            ++ran;
-        }
-        return ran;
-    }
+    blocking_executor(blocking_executor&&) = delete;
+    blocking_executor& operator=(blocking_executor&&) = delete;
 
-    void shutdown() noexcept {
-        shutting_down_ = true;
-    }
+    [[nodiscard]] void_result submit(continuation work);
 
-    [[nodiscard]] bool shutting_down() const noexcept {
-        return shutting_down_;
-    }
+    void shutdown() noexcept;
 
-    [[nodiscard]] std::size_t queued() const {
-        return queue_.size();
-    }
+    [[nodiscard]] bool shutting_down() const;
+
+    [[nodiscard]] std::size_t queued() const;
 
 private:
-    detail::bounded_queue<continuation> queue_;
-    bool shutting_down_{false};
+    struct state;
+
+    std::shared_ptr<state> state_;
 };
 
 } // namespace voris::io
