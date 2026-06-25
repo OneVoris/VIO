@@ -24,6 +24,13 @@ void_result shard::enqueue(continuation next) {
 }
 
 void_result shard::submit(continuation next) {
+    if (!next) {
+        return std::unexpected(make_error(vio_error_code::invalid_state));
+    }
+    if (stop_requested_) {
+        return std::unexpected(make_error(vio_error_code::invalid_state, "shard is stopped"));
+    }
+
     auto result = mailbox_.submit(std::move(next));
     {
         std::lock_guard lock(metrics_mutex_);
@@ -39,6 +46,13 @@ void_result shard::submit(continuation next) {
 }
 
 void_result shard::submit_system(continuation next) {
+    if (!next) {
+        return std::unexpected(make_error(vio_error_code::invalid_state));
+    }
+    if (stop_requested_) {
+        return std::unexpected(make_error(vio_error_code::invalid_state, "shard is stopped"));
+    }
+
     auto result = mailbox_.submit_system(std::move(next));
     {
         std::lock_guard lock(metrics_mutex_);

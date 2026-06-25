@@ -42,6 +42,12 @@ void join_with_timeout(voris::io::shard& current) {
     joiner.join();
 }
 
+void join_runtime_with_timeout(voris::io::runtime& current) {
+    for (std::size_t index = 0; index != current.shard_count(); ++index) {
+        join_with_timeout(current.get_shard(index));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -67,6 +73,24 @@ int main() {
         assert(first.drain() == 1);
         assert(second.drain() == 1);
         assert(value == 3);
+    }
+
+    {
+        runtime_options options;
+        options.shard_count = 1;
+        options.queue_limit = 2;
+        auto created = runtime::create(options);
+        assert(created.has_value());
+
+        auto& first = created->get_shard(0);
+
+        continuation empty_user;
+        assert_error(first.submit(std::move(empty_user)), vio_error_code::invalid_state);
+
+        continuation empty_system;
+        assert_error(first.submit_system(std::move(empty_system)), vio_error_code::invalid_state);
+
+        assert(first.drain() == 0);
     }
 
     {
@@ -118,6 +142,18 @@ int main() {
 
         assert(!first.running());
         assert(first.thread_id() != std::thread::id{});
+
+        bool stopped_user_ran = false;
+        auto stopped_user = first.submit([&stopped_user_ran] { stopped_user_ran = true; });
+        assert_error(stopped_user, vio_error_code::invalid_state);
+
+        bool stopped_system_ran = false;
+        auto stopped_system =
+            first.submit_system([&stopped_system_ran] { stopped_system_ran = true; });
+        assert_error(stopped_system, vio_error_code::invalid_state);
+
+        assert(!stopped_user_ran);
+        assert(!stopped_system_ran);
     }
 
     {
@@ -189,7 +225,7 @@ int main() {
 
         assert(!current_scheduler().has_value());
         created->request_stop();
-        created->join();
+        join_runtime_with_timeout(*created);
     }
 
     {
@@ -224,12 +260,7 @@ int main() {
                                  auto submitted = submit_to(owner_scheduler, [&return_ran] {
                                      return_ran.store(true);
                                  });
-                                 if (!submitted.has_value()) {
-                                     assert(submitted.error().classification ==
-                                                vio_error_code::invalid_state ||
-                                            submitted.error().classification ==
-                                                vio_error_code::resource_exhausted);
-                                 }
+                                 assert_error(submitted, vio_error_code::invalid_state);
                                  {
                                      std::lock_guard lock(mutex);
                                      return_attempted = true;
