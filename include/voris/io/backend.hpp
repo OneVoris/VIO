@@ -40,6 +40,9 @@ struct backend_operation {
     backend_operation_kind kind{};
     scheduler_ref scheduler{};
     backend_handle_token handle{};
+    // Borrowed payload storage must remain alive until the operation reaches
+    // terminal completion and that completion is drained or detached according
+    // to the backend contract.
     std::span<std::byte> read_buffer{};
     std::span<const std::byte> write_buffer{};
     std::span<const std::byte> socket_address{};

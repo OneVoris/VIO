@@ -298,6 +298,12 @@ io_uring_capabilities detect_io_uring_capabilities() noexcept {
 
 #if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
 struct io_uring_backend::kernel_ring {
+    struct sqe_reservation {
+        io_uring_sqe* sqe{};
+        unsigned index{};
+        unsigned next_tail{};
+    };
+
     ~kernel_ring() {
         if (sqes_mapping != nullptr) {
             (void)::munmap(sqes_mapping, sqes_mapping_size);
@@ -341,7 +347,7 @@ struct io_uring_backend::kernel_ring {
         return ring;
     }
 
-    [[nodiscard]] io_result<io_uring_sqe*> acquire_sqe() {
+    [[nodiscard]] io_result<sqe_reservation> reserve_sqe() {
         const auto head = std::atomic_ref<unsigned>(*sq_head).load();
         const auto tail = std::atomic_ref<unsigned>(*sq_tail).load();
         if (tail - head >= *sq_ring_entries) {
@@ -353,8 +359,12 @@ struct io_uring_backend::kernel_ring {
         auto* sqe = &sqes[index];
         std::memset(sqe, 0, sizeof(*sqe));
         sq_array[index] = index;
-        std::atomic_ref<unsigned>(*sq_tail).store(tail + 1U);
-        return sqe;
+        return sqe_reservation{.sqe = sqe, .index = index, .next_tail = tail + 1U};
+    }
+
+    void publish_sqe(const sqe_reservation& reservation) noexcept {
+        (void)reservation.index;
+        std::atomic_ref<unsigned>(*sq_tail).store(reservation.next_tail);
     }
 
     [[nodiscard]] void_result submit_one() {
@@ -525,6 +535,13 @@ void_result io_uring_backend::submit(backend_operation operation) {
     if (!supports_operation_kind(capabilities_, operation.kind)) {
         return std::unexpected(opcode_unavailable_error());
     }
+    if (operation.id == 0) {
+        return std::unexpected(invalid_state_error("operation id must be non-zero"));
+    }
+    if (!fallback_.is_current_handle(operation.handle)) {
+        return std::unexpected(
+            invalid_state_error("operation handle token is not current"));
+    }
     if (use_kernel_submission()) {
         if (!capabilities_.supports_cancel) {
             return std::unexpected(cancellation_required_error());
@@ -532,13 +549,9 @@ void_result io_uring_backend::submit(backend_operation operation) {
         if (auto user_data = encode_operation_user_data(operation.id); !user_data.has_value()) {
             return std::unexpected(user_data.error());
         }
-    }
-    if (operation.id == 0) {
-        return std::unexpected(invalid_state_error("operation id must be non-zero"));
-    }
-    if (!fallback_.is_current_handle(operation.handle)) {
-        return std::unexpected(
-            invalid_state_error("operation handle token is not current"));
+        if (auto valid = validate_kernel_socket_operation(operation); !valid.has_value()) {
+            return valid;
+        }
     }
     if (active_operation_ids_.contains(operation.id)) {
         return std::unexpected(invalid_state_error("operation id is already active"));
@@ -792,22 +805,20 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
         kernel_ring_ = std::move(*created);
     }
 
-    auto sqe_result = kernel_ring_->acquire_sqe();
-    if (!sqe_result.has_value()) {
-        return std::unexpected(sqe_result.error());
-    }
-    auto* sqe = *sqe_result;
-
     const auto fd = native_handle_as_fd(operation.handle.native_handle);
     if (!fd.has_value()) {
         return std::unexpected(fd.error());
     }
-    sqe->fd = *fd;
     const auto user_data = encode_operation_user_data(operation.id);
     if (!user_data.has_value()) {
         return std::unexpected(user_data.error());
     }
-    sqe->user_data = *user_data;
+
+    std::uint8_t opcode{};
+    std::uint64_t offset{};
+    std::uint64_t address{};
+    unsigned length{};
+    unsigned accept_flags{};
 
     switch (operation.kind) {
     case backend_operation_kind::read: {
@@ -815,10 +826,9 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
         if (!size.has_value()) {
             return std::unexpected(size.error());
         }
-        sqe->opcode = IORING_OP_READ;
-        sqe->off = 0;
-        sqe->addr = reinterpret_cast<std::uintptr_t>(operation.read_buffer.data());
-        sqe->len = *size;
+        opcode = IORING_OP_READ;
+        address = reinterpret_cast<std::uintptr_t>(operation.read_buffer.data());
+        length = *size;
         break;
     }
     case backend_operation_kind::write: {
@@ -826,24 +836,19 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
         if (!size.has_value()) {
             return std::unexpected(size.error());
         }
-        sqe->opcode = IORING_OP_WRITE;
-        sqe->off = 0;
-        sqe->addr = reinterpret_cast<std::uintptr_t>(operation.write_buffer.data());
-        sqe->len = *size;
+        opcode = IORING_OP_WRITE;
+        address = reinterpret_cast<std::uintptr_t>(operation.write_buffer.data());
+        length = *size;
         break;
     }
     case backend_operation_kind::accept:
-        sqe->opcode = IORING_OP_ACCEPT;
-        sqe->addr = 0;
-        sqe->addr2 = 0;
-        sqe->len = 0;
-        sqe->accept_flags = SOCK_NONBLOCK | SOCK_CLOEXEC;
+        opcode = IORING_OP_ACCEPT;
+        accept_flags = SOCK_NONBLOCK | SOCK_CLOEXEC;
         break;
     case backend_operation_kind::connect:
-        sqe->opcode = IORING_OP_CONNECT;
-        sqe->off = operation.socket_address.size();
-        sqe->addr = reinterpret_cast<std::uintptr_t>(operation.socket_address.data());
-        sqe->len = 0;
+        opcode = IORING_OP_CONNECT;
+        offset = operation.socket_address.size();
+        address = reinterpret_cast<std::uintptr_t>(operation.socket_address.data());
         break;
     case backend_operation_kind::close:
     case backend_operation_kind::wake:
@@ -851,12 +856,28 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
             invalid_state_error("io_uring kernel submission requires a socket operation"));
     }
 
+    auto reservation = kernel_ring_->reserve_sqe();
+    if (!reservation.has_value()) {
+        return std::unexpected(reservation.error());
+    }
+
+    auto* sqe = reservation->sqe;
+    sqe->opcode = opcode;
+    sqe->fd = *fd;
+    sqe->off = offset;
+    sqe->addr = address;
+    sqe->len = length;
+    sqe->accept_flags = accept_flags;
+    sqe->user_data = *user_data;
+
     kernel_operations_.emplace(operation.id,
                                io_uring_backend::kernel_operation{.operation = operation});
+    kernel_ring_->publish_sqe(*reservation);
     if (auto submitted = kernel_ring_->submit_one(); !submitted.has_value()) {
-        kernel_operations_.erase(operation.id);
-        completion_queue_.push_back(
-            backend_completion{operation.id, std::unexpected(submitted.error())});
+        // After sq_tail is published the SQE may be consumed by this or a later
+        // enter call, so keep operation storage tracked until a CQE or close
+        // cancellation proves the kernel can no longer reference it.
+        return {};
     }
     return {};
 #else
@@ -912,24 +933,28 @@ void_result io_uring_backend::request_kernel_cancellation_for(
         return std::unexpected(cancel_user_data.error());
     }
 
-    auto sqe_result = kernel_ring_->acquire_sqe();
-    if (!sqe_result.has_value()) {
-        return std::unexpected(sqe_result.error());
+    auto reservation = kernel_ring_->reserve_sqe();
+    if (!reservation.has_value()) {
+        return std::unexpected(reservation.error());
     }
 
-    auto* sqe = *sqe_result;
+    auto* sqe = reservation->sqe;
     sqe->opcode = IORING_OP_ASYNC_CANCEL;
     sqe->fd = -1;
     sqe->addr = *target_user_data;
     sqe->cancel_flags = 0;
     sqe->user_data = *cancel_user_data;
 
-    if (auto submitted = kernel_ring_->submit_one(); !submitted.has_value()) {
-        return std::unexpected(submitted.error());
-    }
-
     operation.cancel_submitted = true;
     kernel_cancel_operation_ids_.insert(operation_id);
+    kernel_ring_->publish_sqe(*reservation);
+    if (auto submitted = kernel_ring_->submit_one(); !submitted.has_value()) {
+        // A published cancellation SQE may still be consumed later; retain the
+        // cleanup-only cancel token until its CQE arrives or the original CQE
+        // releases the operation.
+        return {};
+    }
+
     return {};
 #else
     (void)operation_id;
