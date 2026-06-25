@@ -40,11 +40,16 @@ struct backend_operation {
     backend_operation_kind kind{};
     scheduler_ref scheduler{};
     backend_handle_token handle{};
+    std::span<std::byte> read_buffer{};
+    std::span<const std::byte> write_buffer{};
+    std::span<const std::byte> socket_address{};
 };
 
 struct backend_completion {
     std::size_t operation_id{};
     void_result result{};
+    std::size_t bytes_transferred{};
+    std::size_t accepted_native_handle{};
 };
 
 class backend {

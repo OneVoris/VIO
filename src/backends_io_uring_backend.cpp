@@ -2,14 +2,22 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
+#include <cstring>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <span>
 #include <string>
 #include <utility>
 #include <vector>
 
 #if defined(__linux__) && __has_include(<linux/io_uring.h>)
+#include <fcntl.h>
 #include <linux/io_uring.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
@@ -146,6 +154,10 @@ void apply_probe(io_uring_capabilities& capabilities,
     return make_error(vio_error_code::invalid_state, std::move(diagnostic));
 }
 
+[[nodiscard]] vio_error provider_failure(int provider_code) {
+    return make_error(vio_error_code::backend_failure, static_cast<std::int64_t>(provider_code));
+}
+
 [[nodiscard]] vio_error opcode_unavailable_error() {
     return make_error(vio_error_code::unsupported,
                       "io_uring operation opcode is unavailable");
@@ -168,7 +180,26 @@ void apply_probe(io_uring_capabilities& capabilities,
     if (options.completion_batch_limit == 0) {
         options.completion_batch_limit = 1;
     }
+#if !defined(__linux__) || !defined(SYS_io_uring_setup) || !defined(SYS_io_uring_enter)
+    options.enable_kernel_submission = false;
+#endif
     return options;
+}
+
+[[nodiscard]] io_result<unsigned> span_size_as_u32(std::size_t size) {
+    if (size > static_cast<std::size_t>(std::numeric_limits<unsigned>::max())) {
+        return std::unexpected(invalid_state_error("io_uring buffer size does not fit u32"));
+    }
+    return static_cast<unsigned>(size);
+}
+
+[[nodiscard]] io_result<int> native_handle_as_fd(std::size_t native_handle) {
+    if (native_handle == 0 ||
+        native_handle > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return std::unexpected(invalid_state_error(
+            "io_uring native handle must be a valid file descriptor"));
+    }
+    return static_cast<int>(native_handle);
 }
 
 } // namespace
@@ -230,9 +261,189 @@ io_uring_capabilities detect_io_uring_capabilities() noexcept {
 #endif
 }
 
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
+struct io_uring_backend::kernel_ring {
+    ~kernel_ring() {
+        if (sqes_mapping != nullptr) {
+            (void)::munmap(sqes_mapping, sqes_mapping_size);
+        }
+        if (cq_ring_mapping != nullptr && cq_ring_mapping != sq_ring_mapping) {
+            (void)::munmap(cq_ring_mapping, cq_ring_mapping_size);
+        }
+        if (sq_ring_mapping != nullptr) {
+            (void)::munmap(sq_ring_mapping, sq_ring_mapping_size);
+        }
+        if (fd >= 0) {
+            (void)::close(fd);
+        }
+    }
+
+    kernel_ring(const kernel_ring&) = delete;
+    kernel_ring& operator=(const kernel_ring&) = delete;
+
+    [[nodiscard]] static io_result<std::unique_ptr<kernel_ring>> create(
+        std::size_t requested_entries) {
+        if (requested_entries == 0 ||
+            requested_entries > static_cast<std::size_t>(std::numeric_limits<unsigned>::max())) {
+            return std::unexpected(invalid_state_error(
+                "io_uring queue entries must fit unsigned"));
+        }
+
+        io_uring_params setup_params{};
+        const long ring_fd =
+            ::syscall(SYS_io_uring_setup, static_cast<unsigned>(requested_entries),
+                      &setup_params);
+        if (ring_fd < 0) {
+            return std::unexpected(provider_failure(errno));
+        }
+
+        auto ring = std::unique_ptr<kernel_ring>(new kernel_ring());
+        ring->fd = static_cast<int>(ring_fd);
+        ring->params = setup_params;
+        if (auto mapped = ring->map_queues(); !mapped.has_value()) {
+            return std::unexpected(mapped.error());
+        }
+        return ring;
+    }
+
+    [[nodiscard]] io_result<io_uring_sqe*> acquire_sqe() {
+        const auto head = std::atomic_ref<unsigned>(*sq_head).load();
+        const auto tail = std::atomic_ref<unsigned>(*sq_tail).load();
+        if (tail - head >= *sq_ring_entries) {
+            return std::unexpected(make_error(vio_error_code::resource_exhausted,
+                                              "io_uring submission ring is full"));
+        }
+
+        const unsigned index = tail & *sq_ring_mask;
+        auto* sqe = &sqes[index];
+        std::memset(sqe, 0, sizeof(*sqe));
+        sq_array[index] = index;
+        std::atomic_ref<unsigned>(*sq_tail).store(tail + 1U);
+        return sqe;
+    }
+
+    [[nodiscard]] void_result submit_one() {
+        for (;;) {
+            const long submitted = ::syscall(SYS_io_uring_enter, fd, 1U, 0U, 0U, nullptr, 0U);
+            if (submitted == 1) {
+                return {};
+            }
+            if (submitted < 0 && errno == EINTR) {
+                continue;
+            }
+            if (submitted < 0) {
+                return std::unexpected(provider_failure(errno));
+            }
+            return std::unexpected(make_error(vio_error_code::backend_failure,
+                                              "io_uring submitted fewer SQEs than requested"));
+        }
+    }
+
+    [[nodiscard]] std::size_t drain_cqes(std::span<io_uring_cqe> out) {
+        const auto head = std::atomic_ref<unsigned>(*cq_head).load();
+        const auto tail = std::atomic_ref<unsigned>(*cq_tail).load();
+        const std::size_t available = static_cast<std::size_t>(tail - head);
+        const std::size_t count = std::min(out.size(), available);
+
+        for (std::size_t index = 0; index < count; ++index) {
+            const unsigned cqe_index =
+                (head + static_cast<unsigned>(index)) & *cq_ring_mask;
+            out[index] = cqes[cqe_index];
+        }
+        if (count != 0) {
+            std::atomic_ref<unsigned>(*cq_head).store(head + static_cast<unsigned>(count));
+        }
+        return count;
+    }
+
+    int fd{-1};
+    io_uring_params params{};
+    void* sq_ring_mapping{nullptr};
+    void* cq_ring_mapping{nullptr};
+    void* sqes_mapping{nullptr};
+    std::size_t sq_ring_mapping_size{0};
+    std::size_t cq_ring_mapping_size{0};
+    std::size_t sqes_mapping_size{0};
+    unsigned* sq_head{nullptr};
+    unsigned* sq_tail{nullptr};
+    unsigned* sq_ring_mask{nullptr};
+    unsigned* sq_ring_entries{nullptr};
+    unsigned* sq_array{nullptr};
+    io_uring_sqe* sqes{nullptr};
+    unsigned* cq_head{nullptr};
+    unsigned* cq_tail{nullptr};
+    unsigned* cq_ring_mask{nullptr};
+    unsigned* cq_ring_entries{nullptr};
+    io_uring_cqe* cqes{nullptr};
+
+private:
+    kernel_ring() = default;
+
+    [[nodiscard]] void_result map_queues() {
+        sq_ring_mapping_size =
+            params.sq_off.array + params.sq_entries * sizeof(unsigned);
+        cq_ring_mapping_size =
+            params.cq_off.cqes + params.cq_entries * sizeof(io_uring_cqe);
+        if ((params.features & IORING_FEAT_SINGLE_MMAP) != 0U) {
+            sq_ring_mapping_size = std::max(sq_ring_mapping_size, cq_ring_mapping_size);
+            cq_ring_mapping_size = sq_ring_mapping_size;
+        }
+
+        sq_ring_mapping = ::mmap(nullptr, sq_ring_mapping_size, PROT_READ | PROT_WRITE,
+                                 MAP_SHARED, fd, IORING_OFF_SQ_RING);
+        if (sq_ring_mapping == MAP_FAILED) {
+            sq_ring_mapping = nullptr;
+            return std::unexpected(provider_failure(errno));
+        }
+
+        if ((params.features & IORING_FEAT_SINGLE_MMAP) != 0U) {
+            cq_ring_mapping = sq_ring_mapping;
+        } else {
+            cq_ring_mapping = ::mmap(nullptr, cq_ring_mapping_size, PROT_READ | PROT_WRITE,
+                                     MAP_SHARED, fd, IORING_OFF_CQ_RING);
+            if (cq_ring_mapping == MAP_FAILED) {
+                cq_ring_mapping = nullptr;
+                return std::unexpected(provider_failure(errno));
+            }
+        }
+
+        sqes_mapping_size = params.sq_entries * sizeof(io_uring_sqe);
+        sqes_mapping = ::mmap(nullptr, sqes_mapping_size, PROT_READ | PROT_WRITE,
+                              MAP_SHARED, fd, IORING_OFF_SQES);
+        if (sqes_mapping == MAP_FAILED) {
+            sqes_mapping = nullptr;
+            return std::unexpected(provider_failure(errno));
+        }
+
+        bind_offsets();
+        return {};
+    }
+
+    void bind_offsets() noexcept {
+        auto* sq_base = static_cast<std::byte*>(sq_ring_mapping);
+        auto* cq_base = static_cast<std::byte*>(cq_ring_mapping);
+        sq_head = reinterpret_cast<unsigned*>(sq_base + params.sq_off.head);
+        sq_tail = reinterpret_cast<unsigned*>(sq_base + params.sq_off.tail);
+        sq_ring_mask = reinterpret_cast<unsigned*>(sq_base + params.sq_off.ring_mask);
+        sq_ring_entries = reinterpret_cast<unsigned*>(sq_base + params.sq_off.ring_entries);
+        sq_array = reinterpret_cast<unsigned*>(sq_base + params.sq_off.array);
+        sqes = static_cast<io_uring_sqe*>(sqes_mapping);
+        cq_head = reinterpret_cast<unsigned*>(cq_base + params.cq_off.head);
+        cq_tail = reinterpret_cast<unsigned*>(cq_base + params.cq_off.tail);
+        cq_ring_mask = reinterpret_cast<unsigned*>(cq_base + params.cq_off.ring_mask);
+        cq_ring_entries = reinterpret_cast<unsigned*>(cq_base + params.cq_off.ring_entries);
+        cqes = reinterpret_cast<io_uring_cqe*>(cq_base + params.cq_off.cqes);
+    }
+};
+#else
+struct io_uring_backend::kernel_ring {};
+#endif
+
 io_uring_backend::io_uring_backend(io_uring_capabilities capabilities,
                                    io_uring_backend_options options)
     : capabilities_(capabilities), options_(normalize_options(options)) {}
+
+io_uring_backend::~io_uring_backend() = default;
 
 const io_uring_capabilities& io_uring_backend::capabilities() const noexcept {
     return capabilities_;
@@ -319,6 +530,10 @@ void_result io_uring_backend::cancel(std::size_t operation_id, cancellation_reas
         }
         return {};
     }
+    if (use_kernel_submission() && kernel_operations_.contains(operation_id)) {
+        return std::unexpected(make_error(vio_error_code::unsupported,
+                                          "io_uring active cancellation is deferred to M6-005"));
+    }
     return fallback_.cancel(operation_id, reason);
 }
 
@@ -332,8 +547,13 @@ void_result io_uring_backend::close_handle(backend_handle_token token) {
     if (!fallback_.is_current_handle(token)) {
         return std::unexpected(invalid_state_error("backend handle token is not current"));
     }
-    if (auto flushed = flush_queued_submissions_for(token); !flushed.has_value()) {
-        return flushed;
+    if (use_kernel_submission()) {
+        complete_queued_submissions_for(token, closed_completion());
+        complete_kernel_operations_for(token, closed_completion());
+    } else {
+        if (auto flushed = flush_queued_submissions_for(token); !flushed.has_value()) {
+            return flushed;
+        }
     }
     return fallback_.close_handle(token);
 }
@@ -401,6 +621,7 @@ void_result io_uring_backend::shutdown() {
             backend_completion{submission_queue_.front().operation.id, closed_completion()});
         submission_queue_.pop_front();
     }
+    complete_kernel_operations_for({}, closed_completion());
 
     return {};
 }
@@ -429,6 +650,52 @@ void_result io_uring_backend::register_files(std::size_t count) {
     return {};
 }
 
+bool io_uring_backend::use_kernel_submission() const noexcept {
+    return options_.enable_kernel_submission;
+}
+
+void_result io_uring_backend::validate_kernel_socket_operation(
+    const backend_operation& operation) const {
+    if (auto fd = native_handle_as_fd(operation.handle.native_handle); !fd.has_value()) {
+        return std::unexpected(fd.error());
+    }
+
+    switch (operation.kind) {
+    case backend_operation_kind::read:
+        if (auto size = span_size_as_u32(operation.read_buffer.size()); !size.has_value()) {
+            return std::unexpected(size.error());
+        }
+        return {};
+    case backend_operation_kind::write:
+        if (auto size = span_size_as_u32(operation.write_buffer.size()); !size.has_value()) {
+            return std::unexpected(size.error());
+        }
+        return {};
+    case backend_operation_kind::accept:
+        return {};
+    case backend_operation_kind::connect:
+        if (operation.socket_address.empty()) {
+            return std::unexpected(
+                invalid_state_error("io_uring connect requires a socket address"));
+        }
+#if defined(__linux__)
+        if (operation.socket_address.size() >
+            static_cast<std::size_t>(std::numeric_limits<socklen_t>::max())) {
+            return std::unexpected(
+                invalid_state_error("io_uring connect address does not fit socklen_t"));
+        }
+#endif
+        return {};
+    case backend_operation_kind::close:
+    case backend_operation_kind::wake:
+        return std::unexpected(
+            invalid_state_error("io_uring kernel submission requires a socket operation"));
+    }
+
+    return std::unexpected(
+        invalid_state_error("io_uring kernel submission requires a known operation"));
+}
+
 void_result io_uring_backend::submit_to_fallback(queued_submission queued) {
     auto submitted = fallback_.submit(queued.operation);
     if (!submitted.has_value()) {
@@ -444,22 +711,113 @@ void_result io_uring_backend::submit_to_fallback(queued_submission queued) {
     return {};
 }
 
+void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) {
+    const backend_operation& operation = queued.operation;
+    if (auto valid = validate_kernel_socket_operation(operation); !valid.has_value()) {
+        return valid;
+    }
+    if (queued.cancellation.has_value()) {
+        return std::unexpected(make_error(vio_error_code::unsupported,
+                                          "io_uring queued cancellation is deferred to M6-005"));
+    }
+
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
+    if (!kernel_ring_) {
+        auto created = kernel_ring::create(options_.submission_queue_capacity);
+        if (!created.has_value()) {
+            return std::unexpected(created.error());
+        }
+        kernel_ring_ = std::move(*created);
+    }
+
+    auto sqe_result = kernel_ring_->acquire_sqe();
+    if (!sqe_result.has_value()) {
+        return std::unexpected(sqe_result.error());
+    }
+    auto* sqe = *sqe_result;
+
+    const auto fd = native_handle_as_fd(operation.handle.native_handle);
+    if (!fd.has_value()) {
+        return std::unexpected(fd.error());
+    }
+    sqe->fd = *fd;
+    sqe->user_data = operation.id;
+
+    switch (operation.kind) {
+    case backend_operation_kind::read: {
+        const auto size = span_size_as_u32(operation.read_buffer.size());
+        if (!size.has_value()) {
+            return std::unexpected(size.error());
+        }
+        sqe->opcode = IORING_OP_READ;
+        sqe->off = 0;
+        sqe->addr = reinterpret_cast<std::uintptr_t>(operation.read_buffer.data());
+        sqe->len = *size;
+        break;
+    }
+    case backend_operation_kind::write: {
+        const auto size = span_size_as_u32(operation.write_buffer.size());
+        if (!size.has_value()) {
+            return std::unexpected(size.error());
+        }
+        sqe->opcode = IORING_OP_WRITE;
+        sqe->off = 0;
+        sqe->addr = reinterpret_cast<std::uintptr_t>(operation.write_buffer.data());
+        sqe->len = *size;
+        break;
+    }
+    case backend_operation_kind::accept:
+        sqe->opcode = IORING_OP_ACCEPT;
+        sqe->addr = 0;
+        sqe->addr2 = 0;
+        sqe->len = 0;
+        sqe->accept_flags = SOCK_NONBLOCK | SOCK_CLOEXEC;
+        break;
+    case backend_operation_kind::connect:
+        sqe->opcode = IORING_OP_CONNECT;
+        sqe->off = operation.socket_address.size();
+        sqe->addr = reinterpret_cast<std::uintptr_t>(operation.socket_address.data());
+        sqe->len = 0;
+        break;
+    case backend_operation_kind::close:
+    case backend_operation_kind::wake:
+        return std::unexpected(
+            invalid_state_error("io_uring kernel submission requires a socket operation"));
+    }
+
+    kernel_operations_.emplace(operation.id, operation);
+    if (auto submitted = kernel_ring_->submit_one(); !submitted.has_value()) {
+        kernel_operations_.erase(operation.id);
+        completion_queue_.push_back(
+            backend_completion{operation.id, std::unexpected(submitted.error())});
+    }
+    return {};
+#else
+    (void)operation;
+    return std::unexpected(unavailable_error());
+#endif
+}
+
 io_result<std::size_t> io_uring_backend::flush_submission_batch() {
     const auto count = std::min(options_.submit_batch_limit, submission_queue_.size());
     std::size_t flushed = 0;
     for (; flushed < count; ++flushed) {
         auto queued = submission_queue_.front();
-        submission_queue_.pop_front();
-
-        auto submitted = submit_to_fallback(std::move(queued));
+        auto submitted = use_kernel_submission() ? submit_to_kernel(queued)
+                                                 : submit_to_fallback(std::move(queued));
         if (!submitted.has_value()) {
             return std::unexpected(submitted.error());
         }
+        submission_queue_.pop_front();
     }
     return flushed;
 }
 
 io_result<std::size_t> io_uring_backend::observe_completion_batch() {
+    if (use_kernel_submission()) {
+        return observe_kernel_completions();
+    }
+
     auto available = fallback_.poll();
     if (!available.has_value()) {
         return std::unexpected(available.error());
@@ -481,6 +839,71 @@ io_result<std::size_t> io_uring_backend::observe_completion_batch() {
         completion_queue_.push_back(std::move(batch[index]));
     }
     return *drained;
+}
+
+io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
+#if defined(__linux__) && defined(SYS_io_uring_setup) && defined(SYS_io_uring_enter)
+    if (!kernel_ring_) {
+        return 0U;
+    }
+
+    std::vector<io_uring_cqe> batch(options_.completion_batch_limit);
+    const std::size_t count = kernel_ring_->drain_cqes(batch);
+    std::size_t visible = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& cqe = batch[index];
+        const auto operation_id = static_cast<std::size_t>(cqe.user_data);
+        const auto found = kernel_operations_.find(operation_id);
+        if (found == kernel_operations_.end()) {
+            continue;
+        }
+
+        const backend_operation operation = found->second;
+        kernel_operations_.erase(found);
+
+        backend_completion completion{};
+        completion.operation_id = operation_id;
+        if (!fallback_.is_current_handle(operation.handle)) {
+            completion.result = closed_completion();
+        } else if (cqe.res < 0) {
+            completion.result = std::unexpected(provider_failure(-cqe.res));
+        } else {
+            switch (operation.kind) {
+            case backend_operation_kind::read:
+            case backend_operation_kind::write:
+                completion.bytes_transferred = static_cast<std::size_t>(cqe.res);
+                break;
+            case backend_operation_kind::accept:
+                if (cqe.res == 0) {
+                    const int duplicate = ::fcntl(cqe.res, F_DUPFD_CLOEXEC, 1);
+                    if (duplicate < 0) {
+                        completion.result = std::unexpected(provider_failure(errno));
+                        (void)::close(cqe.res);
+                        break;
+                    }
+                    (void)::close(cqe.res);
+                    completion.accepted_native_handle = static_cast<std::size_t>(duplicate);
+                } else {
+                    completion.accepted_native_handle = static_cast<std::size_t>(cqe.res);
+                }
+                break;
+            case backend_operation_kind::connect:
+                break;
+            case backend_operation_kind::close:
+            case backend_operation_kind::wake:
+                completion.result = std::unexpected(invalid_state_error(
+                    "unexpected non-socket io_uring completion"));
+                break;
+            }
+        }
+
+        completion_queue_.push_back(std::move(completion));
+        ++visible;
+    }
+    return visible;
+#else
+    return std::unexpected(unavailable_error());
+#endif
 }
 
 void_result io_uring_backend::drain_fallback_completions() {
@@ -515,6 +938,31 @@ void_result io_uring_backend::flush_queued_submissions_for(backend_handle_token 
         ++iterator;
     }
     return {};
+}
+
+void io_uring_backend::complete_queued_submissions_for(backend_handle_token token,
+                                                       const void_result& result) {
+    for (auto iterator = submission_queue_.begin(); iterator != submission_queue_.end();) {
+        if (token.generation == 0 || iterator->operation.handle == token) {
+            completion_queue_.push_back(
+                backend_completion{iterator->operation.id, result});
+            iterator = submission_queue_.erase(iterator);
+            continue;
+        }
+        ++iterator;
+    }
+}
+
+void io_uring_backend::complete_kernel_operations_for(backend_handle_token token,
+                                                      const void_result& result) {
+    for (auto iterator = kernel_operations_.begin(); iterator != kernel_operations_.end();) {
+        if (token.generation == 0 || iterator->second.handle == token) {
+            completion_queue_.push_back(backend_completion{iterator->first, result});
+            iterator = kernel_operations_.erase(iterator);
+            continue;
+        }
+        ++iterator;
+    }
 }
 
 } // namespace voris::io::backends

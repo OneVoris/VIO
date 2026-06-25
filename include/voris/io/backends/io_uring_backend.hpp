@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <deque>
+#include <memory>
 #include <optional>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <voris/io/backend.hpp>
@@ -28,6 +30,7 @@ struct io_uring_backend_options {
     std::size_t submission_queue_capacity{64};
     std::size_t submit_batch_limit{32};
     std::size_t completion_batch_limit{32};
+    bool enable_kernel_submission{true};
 };
 
 enum class io_uring_backend_state {
@@ -43,6 +46,7 @@ public:
     explicit io_uring_backend(io_uring_capabilities capabilities =
                                   detect_io_uring_capabilities(),
                               io_uring_backend_options options = {});
+    ~io_uring_backend() override;
 
     [[nodiscard]] const io_uring_capabilities& capabilities() const noexcept;
     [[nodiscard]] io_uring_backend_state state() const noexcept;
@@ -68,18 +72,30 @@ private:
         backend_operation operation{};
         std::optional<cancellation_reason> cancellation{};
     };
+    struct kernel_ring;
 
+    [[nodiscard]] bool use_kernel_submission() const noexcept;
+    [[nodiscard]] void_result validate_kernel_socket_operation(
+        const backend_operation& operation) const;
     [[nodiscard]] void_result submit_to_fallback(queued_submission queued);
+    [[nodiscard]] void_result submit_to_kernel(const queued_submission& queued);
     [[nodiscard]] io_result<std::size_t> flush_submission_batch();
     [[nodiscard]] io_result<std::size_t> observe_completion_batch();
+    [[nodiscard]] io_result<std::size_t> observe_kernel_completions();
     [[nodiscard]] void_result drain_fallback_completions();
     [[nodiscard]] void_result flush_queued_submissions_for(backend_handle_token token);
+    void complete_queued_submissions_for(backend_handle_token token,
+                                         const void_result& result);
+    void complete_kernel_operations_for(backend_handle_token token,
+                                        const void_result& result);
 
     io_uring_capabilities capabilities_;
     io_uring_backend_options options_;
     virtual_backend fallback_;
+    std::unique_ptr<kernel_ring> kernel_ring_{};
     std::deque<queued_submission> submission_queue_{};
     std::deque<backend_completion> completion_queue_{};
+    std::unordered_map<std::size_t, backend_operation> kernel_operations_{};
     std::unordered_set<std::size_t> active_operation_ids_{};
     std::size_t registered_buffers_{0};
     std::size_t registered_files_{0};
