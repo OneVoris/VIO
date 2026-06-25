@@ -5,7 +5,9 @@ namespace voris::io {
 runtime::runtime(runtime_options options)
     : options_(options) {
     for (std::size_t i = 0; i != options_.shard_count; ++i) {
-        shards_.push_back(std::make_unique<shard>(options_.queue_limit));
+        shards_.push_back(std::make_unique<shard>(options_.queue_limit,
+                                                  options_.loop_budget,
+                                                  options_.metrics_config));
     }
 }
 
@@ -46,6 +48,14 @@ std::size_t runtime::shard_count() const noexcept {
 
 shard& runtime::get_shard(std::size_t index) {
     return *shards_.at(index);
+}
+
+std::optional<std::size_t> runtime::shard_cpu_affinity(std::size_t index) const {
+    (void)shards_.at(index);
+    if (!options_.cpu_affinity_start.has_value()) {
+        return std::nullopt;
+    }
+    return *options_.cpu_affinity_start + index;
 }
 
 const runtime_options& runtime::options() const noexcept {

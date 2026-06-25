@@ -6,6 +6,7 @@
 namespace voris::io {
 
 struct runtime_metrics_config {
+    // Zero is a valid threshold: any task measured above 0ns is counted as long.
     std::chrono::nanoseconds long_task_threshold{std::chrono::seconds(1)};
 };
 

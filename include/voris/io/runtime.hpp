@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <voris/io/runtime_options.hpp>
@@ -26,6 +27,7 @@ public:
 
     [[nodiscard]] std::size_t shard_count() const noexcept;
     [[nodiscard]] shard& get_shard(std::size_t index);
+    [[nodiscard]] std::optional<std::size_t> shard_cpu_affinity(std::size_t index) const;
     [[nodiscard]] const runtime_options& options() const noexcept;
 
 private:
