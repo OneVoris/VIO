@@ -13,9 +13,14 @@ not expose identical cancellation and file-I/O semantics.
   with generation-aware cookies, and treats stale events after close or native
   descriptor reuse as cleanup-only observations. Non-kqueue platforms keep
   returning `unsupported` for backend operations.
-- IOCP is the Windows completion backend. `OVERLAPPED` operation storage must
-  remain alive after cancellation until the completion or cancellation result is
-  observed.
+- IOCP is the Windows completion backend. It owns one completion port, associates
+  caller-owned native handles with generation-aware completion keys, and drains
+  wake/native packets in bounded `GetQueuedCompletionStatusEx` batches.
+  `OVERLAPPED` operation storage must remain alive after cancellation until the
+  completion or cancellation result is observed. M7-002 does not yet issue
+  native overlapped read/write requests; non-wake packets are retained for the
+  M7-003 operation-storage mapping instead of being converted into user
+  completions.
 
 Cancellation is always a request. Backends that cannot stop an already-started
 file operation must report the real completion result.

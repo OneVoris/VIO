@@ -17,6 +17,7 @@ namespace voris::io {
 namespace backends {
 class epoll_backend;
 class io_uring_backend;
+class iocp_backend;
 class kqueue_backend;
 } // namespace backends
 
@@ -107,6 +108,7 @@ public:
 private:
     friend class backends::epoll_backend;
     friend class backends::io_uring_backend;
+    friend class backends::iocp_backend;
     friend class backends::kqueue_backend;
 
     struct pending_operation {
