@@ -14,7 +14,7 @@ void_result runtime_options::validate() const {
         return std::unexpected(make_error(vio_error_code::invalid_state,
                                           "runtime CPU affinity request range overflows"));
     }
-    auto budget_validation = loop_budget.validate();
+    auto budget_validation = scheduler_budget.validate();
     if (!budget_validation.has_value()) {
         return std::unexpected(budget_validation.error());
     }

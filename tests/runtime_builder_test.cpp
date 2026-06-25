@@ -6,7 +6,10 @@
 #include <limits>
 #include <optional>
 #include <thread>
+#include <type_traits>
 #include <vector>
+
+static_assert(!std::is_constructible_v<voris::io::runtime, voris::io::runtime_options>);
 
 int main() {
     using namespace voris::io;
@@ -30,7 +33,7 @@ int main() {
 
     {
         runtime_options invalid;
-        invalid.loop_budget.task_budget = 0;
+        invalid.scheduler_budget.task_budget = 0;
         auto invalid_runtime = runtime::create(invalid);
         assert(!invalid_runtime.has_value());
         assert(invalid_runtime.error().classification == vio_error_code::invalid_state);
@@ -54,7 +57,7 @@ int main() {
 
     {
         runtime_options options;
-        options.loop_budget =
+        options.scheduler_budget =
             loop_budget{.task_budget = 1, .completion_budget = 8, .timer_budget = 8};
         auto created = runtime::create(options);
         assert(created.has_value());
@@ -93,9 +96,9 @@ int main() {
         options.cpu_affinity_start = 3;
         auto created = runtime::create(options);
         assert(created.has_value());
-        assert(created->shard_cpu_affinity(0) == std::optional<std::size_t>(3));
-        assert(created->shard_cpu_affinity(1) == std::optional<std::size_t>(4));
-        assert(created->shard_cpu_affinity(2) == std::optional<std::size_t>(5));
+        assert(created->requested_shard_cpu_affinity(0) == std::optional<std::size_t>(3));
+        assert(created->requested_shard_cpu_affinity(1) == std::optional<std::size_t>(4));
+        assert(created->requested_shard_cpu_affinity(2) == std::optional<std::size_t>(5));
     }
 
     {
@@ -113,7 +116,7 @@ int main() {
         options.cpu_affinity_start = std::numeric_limits<std::size_t>::max();
         auto created = runtime::create(options);
         assert(created.has_value());
-        assert(created->shard_cpu_affinity(0) ==
+        assert(created->requested_shard_cpu_affinity(0) ==
                std::optional<std::size_t>(std::numeric_limits<std::size_t>::max()));
     }
 
@@ -121,7 +124,7 @@ int main() {
         runtime_options options;
         auto created = runtime::create(options);
         assert(created.has_value());
-        assert(!created->shard_cpu_affinity(0).has_value());
+        assert(!created->requested_shard_cpu_affinity(0).has_value());
     }
 
     return 0;
