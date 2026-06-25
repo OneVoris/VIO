@@ -99,6 +99,21 @@ void apply_probe(io_uring_capabilities& capabilities,
 
 #endif
 
+[[nodiscard]] bool is_socket_operation_kind(backend_operation_kind kind) noexcept {
+    switch (kind) {
+    case backend_operation_kind::read:
+    case backend_operation_kind::write:
+    case backend_operation_kind::accept:
+    case backend_operation_kind::connect:
+        return true;
+    case backend_operation_kind::close:
+    case backend_operation_kind::wake:
+        return false;
+    }
+
+    return false;
+}
+
 [[nodiscard]] bool supports_operation_kind(
     const io_uring_capabilities& capabilities,
     backend_operation_kind kind) noexcept {
@@ -113,7 +128,7 @@ void apply_probe(io_uring_capabilities& capabilities,
         return capabilities.supports_connect;
     case backend_operation_kind::close:
     case backend_operation_kind::wake:
-        return true;
+        return false;
     }
 
     return false;
@@ -256,6 +271,10 @@ void_result io_uring_backend::submit(backend_operation operation) {
     }
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
+    }
+    if (!is_socket_operation_kind(operation.kind)) {
+        return std::unexpected(
+            invalid_state_error("io_uring submit accepts socket operation kinds only"));
     }
     if (!supports_operation_kind(capabilities_, operation.kind)) {
         return std::unexpected(opcode_unavailable_error());

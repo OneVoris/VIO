@@ -76,7 +76,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 - [x] **VIO-M6-001** Detect kernel features and opcodes and build a capability set.
 - [x] **VIO-M6-002** Implement submission/completion queue lifecycle and batched submit/poll.
-- [ ] **VIO-M6-003** Implement socket read, write, accept, and connect operations.
+- [x] **VIO-M6-003** Implement socket read, write, accept, and connect operations.
 - [ ] **VIO-M6-004** Implement file read, write, and `fsync` operations.
 - [ ] **VIO-M6-005** Implement asynchronous cancellation and verify completion races.
 - [ ] **VIO-M6-006** Add optional registered buffers and files without changing default ownership semantics.
