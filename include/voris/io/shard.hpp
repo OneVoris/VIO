@@ -18,7 +18,9 @@ namespace voris::io {
 
 class shard {
 public:
-    explicit shard(std::size_t queue_limit = 1024, loop_budget budget = {});
+    explicit shard(std::size_t queue_limit = 1024,
+                   loop_budget budget = {},
+                   runtime_metrics_config metrics_config = {});
     ~shard();
 
     shard(const shard&) = delete;
@@ -52,9 +54,12 @@ public:
 private:
     void run_loop();
     [[nodiscard]] io_result<std::size_t> run_one_loop_iteration_under_current_scheduler();
+    [[nodiscard]] bool run_one_queued_message();
+    void run_queued_message(detail::mailbox::message message);
 
     detail::mailbox mailbox_;
     loop_budget budget_;
+    runtime_metrics_config metrics_config_;
     backend_wakeup wakeup_;
     runtime_metrics metrics_;
     std::optional<vio_error> loop_error_;

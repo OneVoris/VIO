@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <optional>
+#include <utility>
 
 #include <voris/io/detail/bounded_queue.hpp>
 #include <voris/io/loop_budget.hpp>
@@ -10,16 +12,31 @@ namespace voris::io::detail {
 
 class mailbox {
 public:
+    using clock = std::chrono::steady_clock;
+
+    struct message {
+        continuation work;
+        clock::time_point enqueued_at;
+    };
+
     explicit mailbox(std::size_t capacity)
         : queue_(capacity),
           system_queue_(system_capacity_for(capacity)) {}
 
     [[nodiscard]] void_result submit(continuation message) {
-        return queue_.try_push(std::move(message));
+        return queue_.try_push(make_message(std::move(message)));
     }
 
     [[nodiscard]] void_result submit_system(continuation message) {
-        return system_queue_.try_push(std::move(message));
+        return system_queue_.try_push(make_message(std::move(message)));
+    }
+
+    [[nodiscard]] std::optional<message> pop_next() {
+        auto next = system_queue_.pop();
+        if (!next.has_value()) {
+            next = queue_.pop();
+        }
+        return next;
     }
 
     [[nodiscard]] bool run_one() {
@@ -27,9 +44,7 @@ public:
         if (!next.has_value()) {
             return false;
         }
-        if (*next) {
-            (*next)();
-        }
+        run(*next);
         return true;
     }
 
@@ -41,9 +56,7 @@ public:
                 break;
             }
             (void)budget.consume_task();
-            if (*next) {
-                (*next)();
-            }
+            run(*next);
             ++ran;
         }
         return ran;
@@ -79,20 +92,22 @@ public:
     }
 
 private:
-    [[nodiscard]] std::optional<continuation> pop_next() {
-        auto next = system_queue_.pop();
-        if (!next.has_value()) {
-            next = queue_.pop();
+    [[nodiscard]] static message make_message(continuation work) {
+        return message{.work = std::move(work), .enqueued_at = clock::now()};
+    }
+
+    static void run(message& message) {
+        if (message.work) {
+            message.work();
         }
-        return next;
     }
 
     static constexpr std::size_t system_capacity_for(std::size_t user_capacity) noexcept {
         return user_capacity;
     }
 
-    bounded_queue<continuation> queue_;
-    bounded_queue<continuation> system_queue_;
+    bounded_queue<message> queue_;
+    bounded_queue<message> system_queue_;
 };
 
 } // namespace voris::io::detail

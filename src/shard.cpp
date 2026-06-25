@@ -1,12 +1,14 @@
 #include <voris/io/shard.hpp>
 
+#include <chrono>
 #include <utility>
 
 namespace voris::io {
 
-shard::shard(std::size_t queue_limit, loop_budget budget)
+shard::shard(std::size_t queue_limit, loop_budget budget, runtime_metrics_config metrics_config)
     : mailbox_(queue_limit),
-      budget_(budget) {}
+      budget_(budget),
+      metrics_config_(metrics_config) {}
 
 shard::~shard() {
     request_stop();
@@ -52,11 +54,9 @@ void_result shard::submit_system(continuation next) {
 }
 
 std::size_t shard::drain() {
-    const std::size_t ran = mailbox_.run_until_idle();
-    {
-        std::lock_guard lock(metrics_mutex_);
-        metrics_.completed_tasks += ran;
-        metrics_.queue_depth = mailbox_.size();
+    std::size_t ran = 0;
+    while (run_one_queued_message()) {
+        ++ran;
     }
     return ran;
 }
@@ -72,13 +72,54 @@ io_result<std::size_t> shard::run_one_loop_iteration_under_current_scheduler() {
         return std::unexpected(slice.error());
     }
 
-    const std::size_t ran = mailbox_.run_for_budget(*slice);
-    {
-        std::lock_guard lock(metrics_mutex_);
-        metrics_.completed_tasks += ran;
-        metrics_.queue_depth = mailbox_.size();
+    std::size_t ran = 0;
+    while (slice->remaining_tasks() > 0) {
+        auto next = mailbox_.pop_next();
+        if (!next.has_value()) {
+            break;
+        }
+        (void)slice->consume_task();
+        run_queued_message(std::move(*next));
+        ++ran;
     }
     return ran;
+}
+
+bool shard::run_one_queued_message() {
+    auto next = mailbox_.pop_next();
+    if (!next.has_value()) {
+        std::lock_guard lock(metrics_mutex_);
+        metrics_.queue_depth = mailbox_.size();
+        return false;
+    }
+
+    run_queued_message(std::move(*next));
+    return true;
+}
+
+void shard::run_queued_message(detail::mailbox::message message) {
+    const auto run_started = detail::mailbox::clock::now();
+    const auto lag =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(run_started - message.enqueued_at);
+    std::chrono::nanoseconds task_duration{};
+    if (message.work) {
+        const auto task_started = detail::mailbox::clock::now();
+        message.work();
+        task_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            detail::mailbox::clock::now() - task_started);
+    }
+
+    {
+        std::lock_guard lock(metrics_mutex_);
+        ++metrics_.completed_tasks;
+        metrics_.queue_depth = mailbox_.size();
+        if (metrics_.scheduler_lag < lag) {
+            metrics_.scheduler_lag = lag;
+        }
+        if (task_duration > metrics_config_.long_task_threshold) {
+            ++metrics_.long_tasks;
+        }
+    }
 }
 
 void shard::start() {
