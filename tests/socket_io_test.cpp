@@ -1,11 +1,13 @@
 #include <voris/io/socket.hpp>
 #include <voris/io/detail/socket_accept_errors.hpp>
+#include <voris/io/detail/socket_error_policy.hpp>
 #include <voris/io/detail/socket_io_limits.hpp>
 
 #include <array>
 #include <cerrno>
 #include <cstddef>
 #include <limits>
+#include <utility>
 
 #include "test_assert.hpp"
 
@@ -146,6 +148,43 @@ void test_accept_pending_network_errors_are_retryable() {
 #if defined(ENETUNREACH)
     assert(is_accept_retryable_pending_network_error(ENETUNREACH));
 #endif
+}
+
+void test_socket_error_policy_classifies_retry_and_pending_paths() {
+    using voris::io::detail::classify_socket_accept_errno;
+    using voris::io::detail::classify_socket_connect_errno;
+    using voris::io::detail::classify_socket_transfer_errno;
+    using voris::io::detail::socket_errno_action;
+
+#if defined(EINTR)
+    assert(classify_socket_transfer_errno(EINTR) == socket_errno_action::retry);
+#endif
+#if defined(EAGAIN)
+    assert(classify_socket_transfer_errno(EAGAIN) ==
+           socket_errno_action::operation_in_progress);
+#endif
+    assert(classify_socket_transfer_errno(EBADF) == socket_errno_action::provider_failure);
+
+#if defined(EINTR)
+    assert(classify_socket_accept_errno(EINTR) == socket_errno_action::retry);
+#endif
+#if defined(ENETDOWN)
+    assert(classify_socket_accept_errno(ENETDOWN) == socket_errno_action::retry);
+#endif
+#if defined(EAGAIN)
+    assert(classify_socket_accept_errno(EAGAIN) == socket_errno_action::operation_in_progress);
+#endif
+    assert(classify_socket_accept_errno(EBADF) == socket_errno_action::provider_failure);
+
+#if defined(EINTR)
+    assert(classify_socket_connect_errno(EINTR) ==
+           socket_errno_action::operation_in_progress);
+#endif
+#if defined(EALREADY)
+    assert(classify_socket_connect_errno(EALREADY) ==
+           socket_errno_action::operation_in_progress);
+#endif
+    assert(classify_socket_connect_errno(EBADF) == socket_errno_action::provider_failure);
 }
 
 #if defined(__linux__)
@@ -293,6 +332,52 @@ void wait_for_events(int fd, short events) {
         }
         assert(false);
     }
+}
+
+std::array<unique_fd, 2> make_loopback_connection() {
+    using voris::io::accept_one;
+    using voris::io::finish_connect;
+    using voris::io::start_connect;
+    using voris::io::vio_error_code;
+
+    auto listener = make_loopback_listener();
+    const sockaddr_in address = get_socket_address(listener.get());
+    auto client = make_tcp_socket();
+
+    voris::io::void_result started =
+        start_connect(static_cast<std::size_t>(client.get()), address_view(address));
+    assert(started.has_value() ||
+           started.error().classification == vio_error_code::operation_in_progress);
+    if (!started.has_value()) {
+        wait_for_events(client.get(), POLLOUT);
+    }
+
+    voris::io::void_result finished = finish_connect(static_cast<std::size_t>(client.get()));
+    assert(finished.has_value());
+
+    wait_for_events(listener.get(), POLLIN);
+    voris::io::io_result<std::size_t> accepted =
+        accept_one(static_cast<std::size_t>(listener.get()));
+    assert(accepted.has_value());
+    assert(*accepted != 0);
+    unique_fd server(static_cast<int>(*accepted));
+
+    return {std::move(client), std::move(server)};
+}
+
+void close_with_reset(unique_fd& fd) {
+    linger reset_linger{};
+    reset_linger.l_onoff = 1;
+    reset_linger.l_linger = 0;
+    assert(::setsockopt(fd.get(), SOL_SOCKET, SO_LINGER, &reset_linger,
+                        static_cast<socklen_t>(sizeof(reset_linger))) == 0);
+
+    const int reset_fd = fd.release();
+    assert(::close(reset_fd) == 0);
+}
+
+bool is_peer_reset_write_errno(int provider_code) noexcept {
+    return provider_code == ECONNRESET || provider_code == EPIPE;
 }
 
 void test_linux_accept_one_without_pending_connection_reports_in_progress() {
@@ -633,6 +718,77 @@ void test_linux_vector_closed_peer_write_reports_epipe_without_sigpipe() {
     assert(*written.error().provider_code == EPIPE);
 }
 
+void test_linux_peer_reset_read_reports_provider_failure() {
+    using voris::io::read_some;
+    using voris::io::vio_error_code;
+
+    auto connection = make_loopback_connection();
+    close_with_reset(connection[1]);
+    wait_for_events(connection[0].get(), POLLIN);
+
+    std::array<std::byte, 1> output{};
+    voris::io::io_result<std::size_t> read =
+        read_some(static_cast<std::size_t>(connection[0].get()), output);
+    assert_size_error(read, vio_error_code::backend_failure);
+    assert(read.error().provider_code.has_value());
+    assert(*read.error().provider_code == ECONNRESET);
+}
+
+void test_linux_peer_reset_write_reports_provider_failure() {
+    using voris::io::vio_error_code;
+    using voris::io::write_some;
+
+    auto connection = make_loopback_connection();
+    close_with_reset(connection[1]);
+    wait_for_events(connection[0].get(), POLLIN);
+
+    const std::array<std::byte, 1> input{std::byte{0x72}};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(connection[0].get()), input);
+    assert_size_error(written, vio_error_code::backend_failure);
+    assert(written.error().provider_code.has_value());
+    assert(is_peer_reset_write_errno(static_cast<int>(*written.error().provider_code)));
+}
+
+void test_linux_half_close_drains_then_reports_eof_and_keeps_reverse_direction_open() {
+    using voris::io::read_some;
+    using voris::io::write_some;
+
+    auto sockets = make_socket_pair();
+    set_nonblocking_fd(sockets[0].get());
+    set_nonblocking_fd(sockets[1].get());
+
+    const std::array<std::byte, 2> payload{std::byte{0x68}, std::byte{0x63}};
+    voris::io::io_result<std::size_t> written =
+        write_some(static_cast<std::size_t>(sockets[1].get()), payload);
+    assert(written.has_value());
+    assert(*written == payload.size());
+    assert(::shutdown(sockets[1].get(), SHUT_WR) == 0);
+
+    std::array<std::byte, 2> output{};
+    voris::io::io_result<std::size_t> read =
+        read_some(static_cast<std::size_t>(sockets[0].get()), output);
+    assert(read.has_value());
+    assert(*read == output.size());
+    assert(output == payload);
+
+    std::array<std::byte, 1> eof_probe{};
+    read = read_some(static_cast<std::size_t>(sockets[0].get()), eof_probe);
+    assert(read.has_value());
+    assert(*read == 0);
+
+    const std::array<std::byte, 2> reply{std::byte{0x6f}, std::byte{0x6b}};
+    written = write_some(static_cast<std::size_t>(sockets[0].get()), reply);
+    assert(written.has_value());
+    assert(*written == reply.size());
+
+    std::array<std::byte, 2> reply_output{};
+    read = read_some(static_cast<std::size_t>(sockets[1].get()), reply_output);
+    assert(read.has_value());
+    assert(*read == reply_output.size());
+    assert(reply_output == reply);
+}
+
 void test_linux_zero_length_operations_return_zero() {
     using voris::io::read_some;
     using voris::io::write_some;
@@ -833,6 +989,7 @@ int main() {
     test_socket_io_size_cap();
     test_socket_iovec_plan_caps_segments();
     test_accept_pending_network_errors_are_retryable();
+    test_socket_error_policy_classifies_retry_and_pending_paths();
 
 #if defined(__linux__)
     test_linux_accept_one_without_pending_connection_reports_in_progress();
@@ -849,6 +1006,9 @@ int main() {
     test_linux_vector_would_block_write_uses_operation_in_progress();
     test_linux_closed_peer_write_reports_epipe_without_sigpipe();
     test_linux_vector_closed_peer_write_reports_epipe_without_sigpipe();
+    test_linux_peer_reset_read_reports_provider_failure();
+    test_linux_peer_reset_write_reports_provider_failure();
+    test_linux_half_close_drains_then_reports_eof_and_keeps_reverse_direction_open();
     test_linux_zero_length_operations_return_zero();
     test_linux_vector_zero_length_operations_return_zero_and_skip_empty_segments();
     test_linux_invalid_handles_return_invalid_state();

@@ -1,5 +1,6 @@
 #include <voris/io/socket.hpp>
 #include <voris/io/detail/socket_accept_errors.hpp>
+#include <voris/io/detail/socket_error_policy.hpp>
 #include <voris/io/detail/socket_io_limits.hpp>
 
 #include <algorithm>
@@ -43,11 +44,6 @@ constexpr std::size_t local_iovec_capacity = 1024;
 
 [[nodiscard]] vio_error operation_in_progress_error() {
     return make_error(vio_error_code::operation_in_progress, "socket operation is in progress");
-}
-
-[[nodiscard]] bool is_operation_in_progress_errno(int provider_code) noexcept {
-    return provider_code == EINPROGRESS || provider_code == EALREADY ||
-           provider_code == EAGAIN || provider_code == EWOULDBLOCK;
 }
 
 [[nodiscard]] std::size_t platform_iovec_limit() noexcept {
@@ -208,10 +204,12 @@ io_result<std::size_t> read_some(std::size_t native_handle, std::span<std::byte>
         }
 
         const int provider_code = errno;
-        if (provider_code == EINTR) {
+        const detail::socket_errno_action action =
+            detail::classify_socket_transfer_errno(provider_code);
+        if (action == detail::socket_errno_action::retry) {
             continue;
         }
-        if (provider_code == EAGAIN || provider_code == EWOULDBLOCK) {
+        if (action == detail::socket_errno_action::operation_in_progress) {
             return std::unexpected(operation_in_progress_error());
         }
         return std::unexpected(provider_failure(provider_code));
@@ -248,10 +246,12 @@ io_result<std::size_t> read_some(std::size_t native_handle,
         }
 
         const int provider_code = errno;
-        if (provider_code == EINTR) {
+        const detail::socket_errno_action action =
+            detail::classify_socket_transfer_errno(provider_code);
+        if (action == detail::socket_errno_action::retry) {
             continue;
         }
-        if (provider_code == EAGAIN || provider_code == EWOULDBLOCK) {
+        if (action == detail::socket_errno_action::operation_in_progress) {
             return std::unexpected(operation_in_progress_error());
         }
         return std::unexpected(provider_failure(provider_code));
@@ -282,10 +282,12 @@ io_result<std::size_t> write_some(std::size_t native_handle, std::span<const std
         }
 
         const int provider_code = errno;
-        if (provider_code == EINTR) {
+        const detail::socket_errno_action action =
+            detail::classify_socket_transfer_errno(provider_code);
+        if (action == detail::socket_errno_action::retry) {
             continue;
         }
-        if (provider_code == EAGAIN || provider_code == EWOULDBLOCK) {
+        if (action == detail::socket_errno_action::operation_in_progress) {
             return std::unexpected(operation_in_progress_error());
         }
         return std::unexpected(provider_failure(provider_code));
@@ -325,10 +327,12 @@ io_result<std::size_t> write_some(std::size_t native_handle,
         }
 
         const int provider_code = errno;
-        if (provider_code == EINTR) {
+        const detail::socket_errno_action action =
+            detail::classify_socket_transfer_errno(provider_code);
+        if (action == detail::socket_errno_action::retry) {
             continue;
         }
-        if (provider_code == EAGAIN || provider_code == EWOULDBLOCK) {
+        if (action == detail::socket_errno_action::operation_in_progress) {
             return std::unexpected(operation_in_progress_error());
         }
         return std::unexpected(provider_failure(provider_code));
@@ -366,14 +370,13 @@ io_result<std::size_t> accept_one(std::size_t native_handle) {
         }
 
         const int provider_code = errno;
-        if (provider_code == EINTR) {
+        const detail::socket_errno_action action =
+            detail::classify_socket_accept_errno(provider_code);
+        if (action == detail::socket_errno_action::retry) {
             continue;
         }
-        if (provider_code == EAGAIN || provider_code == EWOULDBLOCK) {
+        if (action == detail::socket_errno_action::operation_in_progress) {
             return std::unexpected(operation_in_progress_error());
-        }
-        if (detail::is_accept_retryable_pending_network_error(provider_code)) {
-            continue;
         }
         return std::unexpected(provider_failure(provider_code));
     }
@@ -403,7 +406,8 @@ void_result start_connect(std::size_t native_handle, socket_address_view remote_
     }
 
     const int provider_code = errno;
-    if (provider_code == EINTR || is_operation_in_progress_errno(provider_code)) {
+    if (detail::classify_socket_connect_errno(provider_code) ==
+        detail::socket_errno_action::operation_in_progress) {
         return std::unexpected(operation_in_progress_error());
     }
     return std::unexpected(provider_failure(provider_code));
@@ -430,7 +434,7 @@ void_result finish_connect(std::size_t native_handle) {
     if (socket_error == 0) {
         return {};
     }
-    if (is_operation_in_progress_errno(socket_error)) {
+    if (detail::is_socket_connect_in_progress_errno(socket_error)) {
         return std::unexpected(operation_in_progress_error());
     }
     return std::unexpected(provider_failure(socket_error));

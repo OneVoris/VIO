@@ -59,7 +59,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M4-006** Define and implement queueing rules for multiple read or write operations; reject undefined concurrent use.
 - [x] **VIO-M4-007** Implement close with pending-operation cancellation, stale-event defense, and file-descriptor reuse handling.
 - [x] **VIO-M4-008** Implement `readv` and `writev` buffer-chain adapters.
-- [ ] **VIO-M4-009** Cover partial I/O, `EINTR`, `EAGAIN`, peer reset, and half-close.
+- [x] **VIO-M4-009** Cover partial I/O, `EINTR`, `EAGAIN`, peer reset, and half-close.
 - [ ] **VIO-M4-010** Run the same backend contract suite against the virtual backend and epoll.
 
 ## M5 — Files and Blocking Work
