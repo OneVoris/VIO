@@ -23,8 +23,35 @@ struct blocking_executor_state {
     bool shutting_down{false};
 
     std::mutex worker_mutex;
+    std::condition_variable join_cv;
     std::vector<std::thread> workers;
+    bool join_started{false};
+    bool join_complete{false};
 };
+
+thread_local blocking_executor_state* current_worker_state = nullptr;
+
+class worker_state_scope {
+public:
+    explicit worker_state_scope(blocking_executor_state& state) noexcept
+        : previous_(current_worker_state) {
+        current_worker_state = &state;
+    }
+
+    worker_state_scope(const worker_state_scope&) = delete;
+    worker_state_scope& operator=(const worker_state_scope&) = delete;
+
+    ~worker_state_scope() {
+        current_worker_state = previous_;
+    }
+
+private:
+    blocking_executor_state* previous_;
+};
+
+[[nodiscard]] bool called_from_worker(blocking_executor_state& state) noexcept {
+    return current_worker_state == &state;
+}
 
 void request_shutdown(blocking_executor_state& state) noexcept {
     {
@@ -35,9 +62,21 @@ void request_shutdown(blocking_executor_state& state) noexcept {
 }
 
 void join_workers(blocking_executor_state& state) noexcept {
+    if (called_from_worker(state)) {
+        return;
+    }
+
     std::vector<std::thread> workers;
     {
-        std::lock_guard lock(state.worker_mutex);
+        std::unique_lock lock(state.worker_mutex);
+        if (state.join_complete) {
+            return;
+        }
+        if (state.join_started) {
+            state.join_cv.wait(lock, [&] { return state.join_complete; });
+            return;
+        }
+        state.join_started = true;
         workers.swap(state.workers);
     }
 
@@ -50,9 +89,17 @@ void join_workers(blocking_executor_state& state) noexcept {
         }
         worker.join();
     }
+
+    {
+        std::lock_guard lock(state.worker_mutex);
+        state.join_complete = true;
+    }
+    state.join_cv.notify_all();
 }
 
 void worker_loop(std::shared_ptr<blocking_executor_state> state) {
+    worker_state_scope worker_scope(*state);
+
     for (;;) {
         continuation work;
         {
@@ -74,7 +121,11 @@ void worker_loop(std::shared_ptr<blocking_executor_state> state) {
 
         // User work runs after releasing executor locks.
         if (work) {
-            work();
+            try {
+                work();
+            } catch (...) {
+                // Submitted blocking work has no result channel; isolate failures to this item.
+            }
         }
     }
 }

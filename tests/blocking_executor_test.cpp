@@ -2,9 +2,10 @@
 
 #include "test_assert.hpp"
 
-#include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -24,8 +25,13 @@ public:
     }
 
     void wait_until_open() {
+        assert(wait_until_open_for(2s));
+    }
+
+    template<class Rep, class Period>
+    [[nodiscard]] bool wait_until_open_for(std::chrono::duration<Rep, Period> timeout) {
         std::unique_lock lock(mutex_);
-        assert(cv_.wait_for(lock, 2s, [&] { return open_; }));
+        return cv_.wait_for(lock, timeout, [&] { return open_; });
     }
 
 private:
@@ -143,6 +149,103 @@ void test_shutdown_drains_queued_work_and_rejects_new_submit() {
     assert(rejected.error().classification == vio_error_code::closed);
 }
 
+bool test_concurrent_shutdown_callers_all_wait_for_join_barrier() {
+    using namespace voris::io;
+
+    blocking_executor executor(1, 1);
+    manual_gate blocker;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool first_entered = false;
+    bool first_returned = false;
+    bool second_returned = false;
+
+    assert(executor
+               .submit([&] {
+                   blocker.arrive();
+                   blocker.wait_for_release();
+               })
+               .has_value());
+    blocker.wait_for_arrival();
+
+    std::thread first_shutdown([&] {
+        {
+            std::lock_guard lock(mutex);
+            first_entered = true;
+        }
+        cv.notify_all();
+        executor.shutdown();
+        {
+            std::lock_guard lock(mutex);
+            first_returned = true;
+        }
+        cv.notify_all();
+    });
+
+    {
+        std::unique_lock lock(mutex);
+        assert(cv.wait_for(lock, 2s, [&] { return first_entered; }));
+        assert(!cv.wait_for(lock, 50ms, [&] { return first_returned; }));
+    }
+
+    std::thread second_shutdown([&] {
+        executor.shutdown();
+        {
+            std::lock_guard lock(mutex);
+            second_returned = true;
+        }
+        cv.notify_all();
+    });
+
+    {
+        std::unique_lock lock(mutex);
+        const bool returned_before_release =
+            cv.wait_for(lock, 50ms, [&] { return first_returned || second_returned; });
+        blocker.release();
+        lock.unlock();
+        first_shutdown.join();
+        second_shutdown.join();
+        if (returned_before_release) {
+            return false;
+        }
+    }
+    assert(first_returned);
+    assert(second_returned);
+    return true;
+}
+
+bool test_throwing_user_work_keeps_worker_alive_for_later_work() {
+    using namespace voris::io;
+
+    blocking_executor executor(1, 2);
+    gate later_work_ran;
+
+    assert(executor.submit([] { throw 7; }).has_value());
+    assert(executor.submit([&] { later_work_ran.open(); }).has_value());
+
+    const bool later_ran = later_work_ran.wait_until_open_for(2s);
+    executor.shutdown();
+    return later_ran;
+}
+
+bool test_worker_thread_shutdown_returns_and_external_shutdown_joins() {
+    using namespace voris::io;
+
+    blocking_executor executor(1, 1);
+    gate worker_shutdown_returned;
+
+    assert(executor
+               .submit([&] {
+                   executor.shutdown();
+                   worker_shutdown_returned.open();
+               })
+               .has_value());
+
+    const bool returned_from_worker_shutdown = worker_shutdown_returned.wait_until_open_for(2s);
+    executor.shutdown();
+    return returned_from_worker_shutdown;
+}
+
 void test_destructor_joins_workers() {
     using namespace voris::io;
 
@@ -232,6 +335,8 @@ void test_user_work_can_submit_without_internal_mutex_deadlock() {
 int main() {
     using namespace voris::io;
 
+    std::set_terminate([] { std::_Exit(99); });
+
     static_assert(!std::is_copy_constructible_v<blocking_executor>);
     static_assert(!std::is_copy_assignable_v<blocking_executor>);
     static_assert(!std::is_move_constructible_v<blocking_executor>);
@@ -240,6 +345,15 @@ int main() {
     test_full_queue_returns_resource_error_while_worker_is_blocked();
     test_work_runs_on_background_worker_thread();
     test_shutdown_drains_queued_work_and_rejects_new_submit();
+    if (!test_concurrent_shutdown_callers_all_wait_for_join_barrier()) {
+        return 1;
+    }
+    if (!test_throwing_user_work_keeps_worker_alive_for_later_work()) {
+        return 2;
+    }
+    if (!test_worker_thread_shutdown_returns_and_external_shutdown_joins()) {
+        return 3;
+    }
     test_destructor_joins_workers();
     test_zero_capacity_rejects_submit();
     test_zero_worker_count_is_normalized_to_one_worker();
