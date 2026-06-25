@@ -45,6 +45,8 @@ constexpr unsigned op_files_update = 20U;
 constexpr unsigned op_read = 22U;
 constexpr unsigned op_write = 23U;
 constexpr std::uint64_t cancel_user_data_tag = 1ULL << 63U;
+// io_uring CQEs report Linux errno values; keep the helper testable off Linux.
+constexpr int linux_ecanceled = 125;
 
 struct decoded_kernel_user_data {
     std::size_t operation_id{};
@@ -112,48 +114,6 @@ void apply_probe(io_uring_capabilities& capabilities,
 }
 
 #endif
-
-[[nodiscard]] bool is_socket_operation(const backend_operation& operation) noexcept {
-    if (operation.target != backend_operation_target::socket) {
-        return false;
-    }
-    switch (operation.kind) {
-    case backend_operation_kind::read:
-    case backend_operation_kind::write:
-    case backend_operation_kind::accept:
-    case backend_operation_kind::connect:
-        return true;
-    case backend_operation_kind::fsync:
-    case backend_operation_kind::close:
-    case backend_operation_kind::wake:
-        return false;
-    }
-
-    return false;
-}
-
-[[nodiscard]] bool is_file_operation(const backend_operation& operation) noexcept {
-    if (operation.target != backend_operation_target::file) {
-        return false;
-    }
-    switch (operation.kind) {
-    case backend_operation_kind::read:
-    case backend_operation_kind::write:
-    case backend_operation_kind::fsync:
-        return true;
-    case backend_operation_kind::accept:
-    case backend_operation_kind::connect:
-    case backend_operation_kind::close:
-    case backend_operation_kind::wake:
-        return false;
-    }
-
-    return false;
-}
-
-[[nodiscard]] bool is_submit_operation(const backend_operation& operation) noexcept {
-    return is_socket_operation(operation) || is_file_operation(operation);
-}
 
 [[nodiscard]] bool supports_operation(
     const io_uring_capabilities& capabilities,
@@ -320,6 +280,16 @@ std::vector<pending_io_uring_submission> take_unsubmitted_io_uring_submissions(
 bool io_uring_cancel_retry_required(bool close_requested,
                                     bool cancel_submitted) noexcept {
     return close_requested && !cancel_submitted;
+}
+
+bool io_uring_completion_should_report_closed(backend_operation_target target,
+                                              bool close_requested,
+                                              bool handle_current,
+                                              int cqe_result) noexcept {
+    if (target == backend_operation_target::file) {
+        return (close_requested || !handle_current) && cqe_result == -linux_ecanceled;
+    }
+    return close_requested || !handle_current;
 }
 
 } // namespace detail
@@ -607,7 +577,7 @@ void_result io_uring_backend::submit(backend_operation operation) {
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
-    if (!is_submit_operation(operation)) {
+    if (!is_valid_backend_operation_shape(operation)) {
         return std::unexpected(
             invalid_state_error("io_uring submit received an invalid operation target"));
     }
@@ -819,7 +789,7 @@ void_result io_uring_backend::validate_kernel_operation(
     if (auto fd = native_handle_as_fd(operation.handle.native_handle); !fd.has_value()) {
         return std::unexpected(fd.error());
     }
-    if (!is_submit_operation(operation)) {
+    if (!is_valid_backend_operation_shape(operation)) {
         return std::unexpected(
             invalid_state_error("io_uring kernel submission received an invalid operation target"));
     }
@@ -1255,8 +1225,9 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
 
         backend_completion completion{};
         completion.operation_id = operation_id;
-        if (operation.close_requested ||
-            !fallback_.is_current_handle(operation.operation.handle)) {
+        const bool handle_current = fallback_.is_current_handle(operation.operation.handle);
+        if (detail::io_uring_completion_should_report_closed(
+                operation.operation.target, operation.close_requested, handle_current, cqe.res)) {
             if (operation.operation.kind == backend_operation_kind::accept && cqe.res >= 0) {
                 (void)::close(cqe.res);
             }

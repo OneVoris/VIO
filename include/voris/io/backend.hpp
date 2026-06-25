@@ -64,6 +64,10 @@ struct backend_completion {
     std::size_t accepted_native_handle{};
 };
 
+[[nodiscard]] bool is_socket_backend_operation(const backend_operation& operation) noexcept;
+[[nodiscard]] bool is_file_backend_operation(const backend_operation& operation) noexcept;
+[[nodiscard]] bool is_valid_backend_operation_shape(const backend_operation& operation) noexcept;
+
 class backend {
 public:
     virtual ~backend() = default;

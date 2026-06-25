@@ -62,6 +62,11 @@ take_unsubmitted_io_uring_submissions(
 [[nodiscard]] bool io_uring_cancel_retry_required(
     bool close_requested,
     bool cancel_submitted) noexcept;
+[[nodiscard]] bool io_uring_completion_should_report_closed(
+    backend_operation_target target,
+    bool close_requested,
+    bool handle_current,
+    int cqe_result) noexcept;
 
 } // namespace detail
 

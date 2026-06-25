@@ -28,6 +28,11 @@ namespace voris::io::backends::detail {
 
 [[nodiscard]] io_uring_capabilities capabilities_from_io_uring_probe_opcodes(
     std::span<const unsigned> supported_opcodes) noexcept;
+[[nodiscard]] bool io_uring_completion_should_report_closed(
+    backend_operation_target target,
+    bool close_requested,
+    bool handle_current,
+    int cqe_result) noexcept;
 
 } // namespace voris::io::backends::detail
 
@@ -44,6 +49,7 @@ constexpr unsigned uapi_op_accept = 13U;
 constexpr unsigned uapi_op_async_cancel = 14U;
 constexpr unsigned uapi_op_connect = 16U;
 constexpr unsigned uapi_op_files_update = 20U;
+constexpr int io_uring_canceled_result = -125;
 
 voris::io::backend_operation operation(std::size_t id,
                                        voris::io::backend_operation_kind kind,
@@ -265,6 +271,29 @@ void test_backend_contract_carries_file_payloads_offsets_and_fsync() {
     assert(fsync.kind == voris::io::backend_operation_kind::fsync);
     assert(fsync.target == voris::io::backend_operation_target::file);
     assert(fsync.offset == 0);
+}
+
+void test_io_uring_close_completion_mapping_is_target_aware() {
+    using voris::io::backend_operation_target;
+    using voris::io::backends::detail::io_uring_completion_should_report_closed;
+
+    assert(io_uring_completion_should_report_closed(backend_operation_target::socket,
+                                                    true, true, 4));
+    assert(io_uring_completion_should_report_closed(backend_operation_target::socket,
+                                                    false, false, 4));
+    assert(!io_uring_completion_should_report_closed(backend_operation_target::socket,
+                                                     false, true, 4));
+
+    assert(!io_uring_completion_should_report_closed(backend_operation_target::file,
+                                                     true, true, 4));
+    assert(!io_uring_completion_should_report_closed(backend_operation_target::file,
+                                                     true, false, -5));
+    assert(!io_uring_completion_should_report_closed(backend_operation_target::file,
+                                                     false, false, 4));
+    assert(io_uring_completion_should_report_closed(backend_operation_target::file,
+                                                    true, true, io_uring_canceled_result));
+    assert(io_uring_completion_should_report_closed(backend_operation_target::file,
+                                                    false, false, io_uring_canceled_result));
 }
 
 #if defined(__linux__)
@@ -726,6 +755,53 @@ void test_linux_real_io_uring_file_close_completes_queued_operation_without_clos
     assert(backend.shutdown().has_value());
 }
 
+void test_linux_real_io_uring_file_write_submitted_before_close_reports_kernel_result() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_write || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto file = make_temporary_file();
+    const std::array<std::byte, 4> seed{
+        std::byte{'_'}, std::byte{'_'}, std::byte{'_'}, std::byte{'_'}};
+    assert_pwrite_all(file.get(), seed, 0);
+
+    const auto token = backend.register_handle(static_cast<std::size_t>(file.get()));
+    assert(token.has_value());
+
+    const std::array<std::byte, 2> payload{std::byte{'O'}, std::byte{'K'}};
+    assert(backend.submit(file_write_operation(987, *token, payload, 1)).has_value());
+
+    auto flushed = backend.poll();
+    assert(flushed.has_value());
+    assert(backend.close_handle(*token).has_value());
+
+    std::array<voris::io::backend_completion, 1> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    if (*drained == 0) {
+        completions[0] = wait_for_real_completion(backend);
+    }
+
+    assert(completions[0].operation_id == 987);
+    const auto output = read_file_bytes(file.get(), seed.size(), 0);
+    const bool write_took_effect =
+        output[0] == std::byte{'_'} && output[1] == std::byte{'O'} &&
+        output[2] == std::byte{'K'} && output[3] == std::byte{'_'};
+    if (completions[0].result.has_value()) {
+        assert(completions[0].bytes_transferred == payload.size());
+        assert(write_took_effect);
+    } else if (completions[0].result.error().classification ==
+               voris::io::vio_error_code::closed) {
+        assert(!write_took_effect);
+    } else {
+        assert(completions[0].result.error().classification ==
+               voris::io::vio_error_code::backend_failure);
+    }
+    assert(backend.shutdown().has_value());
+}
+
 void test_linux_real_io_uring_file_shutdown_closes_queued_operation() {
     auto caps = voris::io::backends::detect_io_uring_capabilities();
     if (!caps.available || !caps.supports_fsync || !caps.supports_cancel) {
@@ -932,6 +1008,24 @@ void test_default_eligibility_requires_core_capabilities() {
         &voris::io::backends::io_uring_capabilities::supports_fsync);
     assert_not_default_eligible_when(
         &voris::io::backends::io_uring_capabilities::supports_cancel);
+}
+
+void test_supports_files_is_default_eligibility_aggregate_not_submit_gate() {
+    auto caps = core_capabilities();
+    caps.supports_files = false;
+
+    voris::io::backends::io_uring_backend backend(caps, deterministic_options());
+    assert(!backend.default_eligible());
+
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    const std::array<std::byte, 1> input{std::byte{'f'}};
+    assert(backend.submit(file_read_operation(151, *token, output, 0)).has_value());
+    assert(backend.submit(file_write_operation(152, *token, input, 0)).has_value());
+    assert(backend.submit(file_fsync_operation(153, *token)).has_value());
+    assert(backend.shutdown().has_value());
 }
 
 void test_probe_opcode_mapping_is_deterministic() {
@@ -1869,8 +1963,10 @@ int main() {
     using namespace voris::io;
 
     test_default_eligibility_requires_core_capabilities();
+    test_supports_files_is_default_eligibility_aggregate_not_submit_gate();
     test_backend_contract_carries_socket_payloads_and_results();
     test_backend_contract_carries_file_payloads_offsets_and_fsync();
+    test_io_uring_close_completion_mapping_is_target_aware();
     test_probe_opcode_mapping_is_deterministic();
     test_probe_files_require_read_write_and_fsync();
     test_probe_registered_capabilities_are_independent_candidates();
@@ -1907,6 +2003,7 @@ int main() {
     test_linux_real_io_uring_file_fsync_completes_successfully();
     test_linux_real_io_uring_file_provider_error_is_reported();
     test_linux_real_io_uring_file_close_completes_queued_operation_without_closing_fd();
+    test_linux_real_io_uring_file_write_submitted_before_close_reports_kernel_result();
     test_linux_real_io_uring_file_shutdown_closes_queued_operation();
     test_linux_real_io_uring_close_completes_queued_socket_operation();
     test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion();

@@ -32,6 +32,14 @@ voris::io::backend_operation operation(std::size_t id,
     return result;
 }
 
+voris::io::backend_operation file_operation(std::size_t id,
+                                            voris::io::backend_operation_kind kind,
+                                            voris::io::backend_handle_token token) {
+    auto result = operation(id, kind, token);
+    result.target = voris::io::backend_operation_target::file;
+    return result;
+}
+
 void assert_void_error(const voris::io::void_result& result, voris::io::vio_error_code expected) {
     assert(!result.has_value());
     assert(result.error().classification == expected);
@@ -283,6 +291,26 @@ void test_readiness_mask_completes_only_compatible_operation_kind() {
     assert(backend.shutdown().has_value());
 }
 
+void test_submit_rejects_file_operations_for_readiness_backend() {
+    unique_fd fd = make_event_fd();
+
+    voris::io::backends::epoll_backend backend;
+    auto token = require_token(backend.register_handle(static_cast<std::size_t>(fd.get())));
+
+    assert_void_error(backend.submit(file_operation(371, voris::io::backend_operation_kind::read,
+                                                    token)),
+                      voris::io::vio_error_code::invalid_state);
+    assert_void_error(backend.submit(file_operation(372, voris::io::backend_operation_kind::write,
+                                                    token)),
+                      voris::io::vio_error_code::invalid_state);
+    assert_void_error(backend.submit(file_operation(373, voris::io::backend_operation_kind::fsync,
+                                                    token)),
+                      voris::io::vio_error_code::invalid_state);
+
+    assert(backend.close_handle(token).has_value());
+    assert(backend.shutdown().has_value());
+}
+
 void test_same_numeric_fd_reuse_uses_new_generation() {
     unique_fd old_read;
     unique_fd old_write;
@@ -382,6 +410,7 @@ int main() {
     test_close_pending_operation_wins_over_queued_readiness();
     test_close_after_external_fd_close_still_completes_pending_operation();
     test_readiness_mask_completes_only_compatible_operation_kind();
+    test_submit_rejects_file_operations_for_readiness_backend();
     test_same_numeric_fd_reuse_uses_new_generation();
     test_shutdown_defines_later_behavior();
 #else

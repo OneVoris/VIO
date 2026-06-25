@@ -28,6 +28,14 @@ inline voris::io::backend_operation operation(std::size_t id,
     return result;
 }
 
+inline voris::io::backend_operation file_operation(std::size_t id,
+                                                   voris::io::backend_operation_kind kind,
+                                                   voris::io::backend_handle_token token) {
+    auto result = operation(id, kind, token);
+    result.target = voris::io::backend_operation_target::file;
+    return result;
+}
+
 inline void assert_void_error(const voris::io::void_result& result,
                               voris::io::vio_error_code expected) {
     assert(!result.has_value());
@@ -243,6 +251,23 @@ void test_submit_accepts_current_token_and_rejects_default_and_closed_tokens() {
 }
 
 template <class Fixture>
+void test_submit_rejects_invalid_operation_shapes() {
+    using namespace voris::io;
+
+    Fixture fixture;
+    const auto token = require_token(fixture.backend.register_handle(fixture.make_native_handle()));
+
+    assert_void_error(fixture.backend.submit(operation(51, backend_operation_kind::fsync, token)),
+                      vio_error_code::invalid_state);
+    assert_void_error(
+        fixture.backend.submit(file_operation(52, backend_operation_kind::accept, token)),
+        vio_error_code::invalid_state);
+    assert_void_error(
+        fixture.backend.submit(file_operation(53, backend_operation_kind::connect, token)),
+        vio_error_code::invalid_state);
+}
+
+template <class Fixture>
 void test_close_handle_completes_all_pending_operations_once() {
     using namespace voris::io;
 
@@ -385,6 +410,7 @@ template <class Fixture>
 void run_backend_contract_suite() {
     test_register_valid_handle_returns_token_and_invalid_handle_is_rejected<Fixture>();
     test_submit_accepts_current_token_and_rejects_default_and_closed_tokens<Fixture>();
+    test_submit_rejects_invalid_operation_shapes<Fixture>();
     test_close_handle_completes_all_pending_operations_once<Fixture>();
     test_close_one_handle_does_not_complete_another_handles_pending_operations<Fixture>();
     test_operation_id_cannot_reuse_until_queued_completion_is_drained<Fixture>();
@@ -395,6 +421,26 @@ void run_backend_contract_suite() {
 
 inline void run_virtual_backend_contract_suite() {
     run_backend_contract_suite<virtual_contract_fixture>();
+
+    using namespace voris::io;
+
+    virtual_contract_fixture fixture;
+    const auto token = require_token(fixture.backend.register_handle(fixture.make_native_handle()));
+    assert(fixture.backend.submit(file_operation(54, backend_operation_kind::read, token))
+               .has_value());
+    assert(fixture.backend.submit(file_operation(55, backend_operation_kind::write, token))
+               .has_value());
+    assert(fixture.backend.submit(file_operation(56, backend_operation_kind::fsync, token))
+               .has_value());
+
+    assert(fixture.backend.close_handle(token).has_value());
+    assert_poll_count(fixture.backend, fixture.expected_poll_count_after_close(3));
+
+    std::array<backend_completion, 4> completions{};
+    assert(drain(fixture.backend, completions) == 3);
+    assert_completion_error(completions[0], 54, vio_error_code::closed);
+    assert_completion_error(completions[1], 55, vio_error_code::closed);
+    assert_completion_error(completions[2], 56, vio_error_code::closed);
 }
 
 inline void run_epoll_backend_contract_suite() {

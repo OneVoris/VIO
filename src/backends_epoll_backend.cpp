@@ -160,6 +160,10 @@ void_result epoll_backend::submit(backend_operation operation) {
     if (auto initialized = initialization_result(); !initialized.has_value()) {
         return initialized;
     }
+    if (!is_socket_backend_operation(operation)) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "epoll backend accepts socket readiness operations only"));
+    }
     return fallback_.submit(operation);
 #else
     (void)operation;

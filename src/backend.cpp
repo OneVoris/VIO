@@ -26,6 +26,50 @@ namespace {
 
 } // namespace
 
+bool is_socket_backend_operation(const backend_operation& operation) noexcept {
+    if (operation.target != backend_operation_target::socket) {
+        return false;
+    }
+
+    switch (operation.kind) {
+    case backend_operation_kind::read:
+    case backend_operation_kind::write:
+    case backend_operation_kind::accept:
+    case backend_operation_kind::connect:
+        return true;
+    case backend_operation_kind::fsync:
+    case backend_operation_kind::close:
+    case backend_operation_kind::wake:
+        return false;
+    }
+
+    return false;
+}
+
+bool is_file_backend_operation(const backend_operation& operation) noexcept {
+    if (operation.target != backend_operation_target::file) {
+        return false;
+    }
+
+    switch (operation.kind) {
+    case backend_operation_kind::read:
+    case backend_operation_kind::write:
+    case backend_operation_kind::fsync:
+        return true;
+    case backend_operation_kind::accept:
+    case backend_operation_kind::connect:
+    case backend_operation_kind::close:
+    case backend_operation_kind::wake:
+        return false;
+    }
+
+    return false;
+}
+
+bool is_valid_backend_operation_shape(const backend_operation& operation) noexcept {
+    return is_socket_backend_operation(operation) || is_file_backend_operation(operation);
+}
+
 io_result<backend_handle_token> virtual_backend::register_handle(std::size_t native_handle) {
     if (stopped_) {
         return std::unexpected(make_error(vio_error_code::closed));
@@ -46,6 +90,9 @@ void_result virtual_backend::submit(backend_operation operation) {
     }
     if (operation.id == 0) {
         return invalid_state("operation id must be non-zero");
+    }
+    if (!is_valid_backend_operation_shape(operation)) {
+        return invalid_state("operation kind and target are incompatible");
     }
     if (!is_current_handle(operation.handle)) {
         return invalid_state("operation handle token is not current");
@@ -177,8 +224,7 @@ void virtual_backend::complete_pending(backend_handle_token token,
                                        backend_operation_kind readiness_kind,
                                        const void_result& result) {
     for (auto iterator = pending_.begin(); iterator != pending_.end();) {
-        const bool is_socket_operation =
-            iterator->operation.target == backend_operation_target::socket;
+        const bool is_socket_operation = is_socket_backend_operation(iterator->operation);
         const bool kind_matches =
             is_socket_operation &&
             ((readiness_kind == backend_operation_kind::read &&
