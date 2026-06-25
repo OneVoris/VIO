@@ -19,15 +19,20 @@ not expose identical cancellation and file-I/O semantics.
   batches. Submitted operations own heap-stable internal `OVERLAPPED` storage;
   native packets map by the original `OVERLAPPED*` plus the submitted
   association generation to exactly one backend completion. Unknown or stale
-  `OVERLAPPED*` packets are cleanup-only. Cancellation records the first reason,
-  requests `CancelIoEx` for active storage when possible, and keeps the storage
-  alive until the original native completion is observed. Close and shutdown
-  request cancellation but report active operations as `closed` only when their
-  original native completion arrives. If an explicit cancellation reason was
-  recorded first and the provider later reports an aborted or cancelled native
-  result, the completion remains `cancelled` with that first reason rather than
-  being rewritten as `closed`. The port is kept open during shutdown while active
-  native storage can still be referenced.
+  `OVERLAPPED*` packets are cleanup-only. M7-003 has not yet wired real
+  `ReadFile`/`WriteFile` submission, so synthetic storage that has not been
+  submitted to a provider completes deterministically: explicit cancel queues one
+  `cancelled` completion with the first reason, while close and shutdown queue
+  one `closed` completion. The operation id remains active until that visible
+  completion is drained. Real native-submitted operations request `CancelIoEx`
+  when possible and keep storage alive until the original native completion is
+  observed. Close and shutdown default active operations to `closed`; the
+  exception is an explicit cancellation reason recorded before close/shutdown,
+  followed by a provider aborted/cancelled result, which remains `cancelled` with
+  that first reason. A late cancel after close/shutdown is rejected and cannot
+  rewrite the terminal source. The port is kept open during shutdown while active
+  native storage can still be referenced, and already queued visible completions
+  remain poll-visible even after the port itself closes.
 
 Cancellation is always a request. Backends that cannot stop an already-started
 file operation must report the real completion result.

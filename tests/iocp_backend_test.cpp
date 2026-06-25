@@ -371,8 +371,6 @@ void test_active_native_storage_is_stable_and_retained_until_completion() {
         require_overlapped(iocp_detail::iocp_overlapped_for(backend, 102));
     assert(second_overlapped != first_overlapped);
 
-    assert(backend.cancel(101, voris::io::cancellation_reason::manual).has_value());
-    assert(iocp_detail::iocp_cancel_request_count(backend) == 1);
     assert(iocp_detail::iocp_operation_storage_count(backend) == 2);
 
     assert(iocp_detail::queue_iocp_test_packet(backend, key, 13U, first_overlapped,
@@ -412,6 +410,47 @@ void test_active_native_storage_is_stable_and_retained_until_completion() {
     assert_success_completion(completions[0], 102, 17U);
     assert_success_completion(completions[1], 101, 19U);
     assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
+
+    assert(backend.close_handle(token).has_value());
+    assert(backend.shutdown().has_value());
+}
+
+void test_synthetic_cancel_records_first_reason_and_completes_once() {
+    namespace iocp_detail = voris::io::backends::detail;
+
+    auto file = make_overlapped_temp_file();
+    voris::io::backends::iocp_backend backend;
+    const auto token = require_token(backend.register_handle(native_handle_value(file.get())));
+    const auto key = require_completion_key(iocp_detail::iocp_completion_key_for(backend, token));
+
+    assert(backend.submit(file_operation(151, voris::io::backend_operation_kind::read, token))
+               .has_value());
+    void* overlapped = require_overlapped(iocp_detail::iocp_overlapped_for(backend, 151));
+
+    assert(backend.cancel(151, voris::io::cancellation_reason::manual).has_value());
+    assert_void_error(backend.cancel(151, voris::io::cancellation_reason::deadline),
+                      voris::io::vio_error_code::invalid_state);
+    assert(iocp_detail::iocp_cancel_request_count(backend) == 0);
+    assert(iocp_detail::iocp_operation_storage_count(backend) == 0);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 1);
+
+    auto visible = backend.poll();
+    assert(visible.has_value());
+    assert(*visible == 1);
+
+    std::array<voris::io::backend_completion, 8> completions{};
+    assert(drain(backend, completions) == 1);
+    assert_cancelled_completion(completions[0], 151, "manual");
+    assert(completions[0].result.error().diagnostic.find("deadline") == std::string::npos);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
+
+    assert(iocp_detail::queue_iocp_test_packet(backend, key, 0U, overlapped,
+                                               iocp_detail::iocp_status_operation_aborted)
+               .has_value());
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    assert(drain(backend, completions) == 0);
 
     assert(backend.close_handle(token).has_value());
     assert(backend.shutdown().has_value());
@@ -461,7 +500,7 @@ void test_native_completion_maps_by_overlapped_once_and_unknown_is_cleanup_only(
     assert(backend.shutdown().has_value());
 }
 
-void test_cancel_records_first_reason_and_waits_for_native_cancel_completion() {
+void test_native_cancel_records_first_reason_and_waits_for_provider_completion() {
     namespace iocp_detail = voris::io::backends::detail;
 
     auto file = make_overlapped_temp_file();
@@ -471,6 +510,7 @@ void test_cancel_records_first_reason_and_waits_for_native_cancel_completion() {
 
     assert(backend.submit(file_operation(301, voris::io::backend_operation_kind::read, token))
                .has_value());
+    assert(iocp_detail::mark_iocp_operation_native_submitted(backend, 301).has_value());
     void* overlapped = require_overlapped(iocp_detail::iocp_overlapped_for(backend, 301));
 
     assert(backend.cancel(301, voris::io::cancellation_reason::manual).has_value());
@@ -499,7 +539,7 @@ void test_cancel_records_first_reason_and_waits_for_native_cancel_completion() {
     assert(backend.shutdown().has_value());
 }
 
-void test_close_waits_for_original_native_completion_and_reports_closed() {
+void test_synthetic_close_completes_without_native_packet_and_rejects_late_cancel() {
     namespace iocp_detail = voris::io::backends::detail;
 
     auto file = make_overlapped_temp_file();
@@ -513,30 +553,36 @@ void test_close_waits_for_original_native_completion_and_reports_closed() {
 
     assert(backend.close_handle(token).has_value());
     assert_handle_is_still_open(file.get());
-    assert(iocp_detail::iocp_operation_storage_count(backend) == 1);
-    assert(iocp_detail::iocp_cancel_request_count(backend) == 1);
+    assert(iocp_detail::iocp_operation_storage_count(backend) == 0);
+    assert(iocp_detail::iocp_cancel_request_count(backend) == 0);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 1);
+    assert_void_error(backend.cancel(401, voris::io::cancellation_reason::manual),
+                      voris::io::vio_error_code::invalid_state);
     assert_void_error(backend.submit(file_operation(402, voris::io::backend_operation_kind::read,
                                                     token)),
                       voris::io::vio_error_code::invalid_state);
 
     std::array<voris::io::backend_completion, 8> completions{};
-    assert(drain(backend, completions) == 0);
+    auto visible = backend.poll();
+    assert(visible.has_value());
+    assert(*visible == 1);
+    assert(drain(backend, completions) == 1);
+    assert_closed_completion(completions[0], 401);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
 
     assert(iocp_detail::queue_iocp_test_packet(backend, key, 23U, overlapped,
-                                               iocp_detail::iocp_status_success)
+                                               iocp_detail::iocp_status_operation_aborted)
                .has_value());
     auto polled = backend.poll();
     assert(polled.has_value());
     assert(*polled == 1);
-    assert(drain(backend, completions) == 1);
-    assert_closed_completion(completions[0], 401);
+    assert(drain(backend, completions) == 0);
     assert(iocp_detail::iocp_operation_storage_count(backend) == 0);
-    assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
 
     assert(backend.shutdown().has_value());
 }
 
-void test_shutdown_keeps_port_until_active_native_completion_is_observed() {
+void test_native_close_waits_for_original_completion_and_rejects_late_cancel() {
     namespace iocp_detail = voris::io::backends::detail;
 
     auto file = make_overlapped_temp_file();
@@ -544,19 +590,95 @@ void test_shutdown_keeps_port_until_active_native_completion_is_observed() {
     const auto token = require_token(backend.register_handle(native_handle_value(file.get())));
     const auto key = require_completion_key(iocp_detail::iocp_completion_key_for(backend, token));
 
-    assert(backend.submit(file_operation(501, voris::io::backend_operation_kind::read, token))
+    assert(backend.submit(file_operation(451, voris::io::backend_operation_kind::read, token))
                .has_value());
-    void* overlapped = require_overlapped(iocp_detail::iocp_overlapped_for(backend, 501));
+    assert(iocp_detail::mark_iocp_operation_native_submitted(backend, 451).has_value());
+    void* overlapped = require_overlapped(iocp_detail::iocp_overlapped_for(backend, 451));
 
-    assert(backend.shutdown().has_value());
+    assert(backend.close_handle(token).has_value());
+    assert_handle_is_still_open(file.get());
     assert(iocp_detail::iocp_operation_storage_count(backend) == 1);
     assert(iocp_detail::iocp_cancel_request_count(backend) == 1);
+    assert_void_error(backend.cancel(451, voris::io::cancellation_reason::manual),
+                      voris::io::vio_error_code::closed);
+
+    std::array<voris::io::backend_completion, 8> completions{};
+    assert(drain(backend, completions) == 0);
+
+    assert(iocp_detail::queue_iocp_test_packet(backend, key, 23U, overlapped,
+                                               iocp_detail::iocp_status_operation_aborted)
+               .has_value());
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    assert(drain(backend, completions) == 1);
+    assert_closed_completion(completions[0], 451);
+    assert(iocp_detail::iocp_operation_storage_count(backend) == 0);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
+
+    assert(backend.shutdown().has_value());
+}
+
+void test_synthetic_shutdown_completes_without_native_packet_and_releases_on_drain() {
+    namespace iocp_detail = voris::io::backends::detail;
+
+    auto file = make_overlapped_temp_file();
+    voris::io::backends::iocp_backend backend;
+    const auto token = require_token(backend.register_handle(native_handle_value(file.get())));
+
+    assert(backend.submit(file_operation(501, voris::io::backend_operation_kind::read, token))
+               .has_value());
+
+    assert(backend.shutdown().has_value());
+    assert(iocp_detail::iocp_operation_storage_count(backend) == 0);
+    assert(iocp_detail::iocp_cancel_request_count(backend) == 0);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 1);
     assert_token_error(backend.register_handle(native_handle_value(file.get())),
                        voris::io::vio_error_code::closed);
     assert_void_error(backend.submit(file_operation(502, voris::io::backend_operation_kind::read,
                                                     token)),
                       voris::io::vio_error_code::closed);
     assert_void_error(backend.wake(), voris::io::vio_error_code::closed);
+    assert_void_error(backend.cancel(501, voris::io::cancellation_reason::manual),
+                      voris::io::vio_error_code::closed);
+
+    auto visible = backend.poll();
+    assert(visible.has_value());
+    assert(*visible == 1);
+
+    std::array<voris::io::backend_completion, 8> completions{};
+    assert(drain(backend, completions) == 1);
+    assert_closed_completion(completions[0], 501);
+    assert(iocp_detail::iocp_operation_storage_count(backend) == 0);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
+
+    assert(backend.shutdown().has_value());
+}
+
+void test_native_shutdown_keeps_port_until_active_completion_is_observed() {
+    namespace iocp_detail = voris::io::backends::detail;
+
+    auto file = make_overlapped_temp_file();
+    voris::io::backends::iocp_backend backend;
+    const auto token = require_token(backend.register_handle(native_handle_value(file.get())));
+    const auto key = require_completion_key(iocp_detail::iocp_completion_key_for(backend, token));
+
+    assert(backend.submit(file_operation(551, voris::io::backend_operation_kind::read, token))
+               .has_value());
+    assert(iocp_detail::mark_iocp_operation_native_submitted(backend, 551).has_value());
+    void* overlapped = require_overlapped(iocp_detail::iocp_overlapped_for(backend, 551));
+
+    assert(backend.shutdown().has_value());
+    assert(iocp_detail::iocp_operation_storage_count(backend) == 1);
+    assert(iocp_detail::iocp_cancel_request_count(backend) == 1);
+    assert_token_error(backend.register_handle(native_handle_value(file.get())),
+                       voris::io::vio_error_code::closed);
+    assert_void_error(backend.submit(file_operation(552, voris::io::backend_operation_kind::read,
+                                                    token)),
+                      voris::io::vio_error_code::closed);
+    assert_void_error(backend.wake(), voris::io::vio_error_code::closed);
+    assert_void_error(backend.cancel(551, voris::io::cancellation_reason::manual),
+                      voris::io::vio_error_code::closed);
 
     assert(iocp_detail::queue_iocp_test_packet(backend, key, 29U, overlapped,
                                                iocp_detail::iocp_status_success)
@@ -567,7 +689,7 @@ void test_shutdown_keeps_port_until_active_native_completion_is_observed() {
 
     std::array<voris::io::backend_completion, 8> completions{};
     assert(drain(backend, completions) == 1);
-    assert_closed_completion(completions[0], 501);
+    assert_closed_completion(completions[0], 551);
     assert(iocp_detail::iocp_operation_storage_count(backend) == 0);
     assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
 
@@ -596,6 +718,14 @@ void test_generation_reuse_does_not_misattribute_old_overlapped_completion() {
         require_overlapped(iocp_detail::iocp_overlapped_for(backend, 601));
 
     assert(backend.close_handle(old_token).has_value());
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+
+    std::array<voris::io::backend_completion, 8> completions{};
+    assert(drain(backend, completions) == 1);
+    assert_closed_completion(completions[0], 601);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
 
     auto new_file = make_overlapped_temp_file();
     const auto new_token =
@@ -614,14 +744,11 @@ void test_generation_reuse_does_not_misattribute_old_overlapped_completion() {
     assert(iocp_detail::queue_iocp_test_packet(backend, old_key, 31U, old_overlapped,
                                                iocp_detail::iocp_status_success)
                .has_value());
-    auto polled = backend.poll();
+    polled = backend.poll();
     assert(polled.has_value());
     assert(*polled == 1);
-
-    std::array<voris::io::backend_completion, 8> completions{};
-    assert(drain(backend, completions) == 1);
-    assert_closed_completion(completions[0], 601);
     assert(iocp_detail::iocp_active_operation_id_count(backend) == 1);
+    assert(drain(backend, completions) == 0);
 
     assert(iocp_detail::queue_iocp_test_packet(backend, old_key, 37U, old_overlapped,
                                                iocp_detail::iocp_status_success)
@@ -673,9 +800,6 @@ void test_register_associates_valid_handle_and_rejects_duplicate_and_stale_token
                       voris::io::vio_error_code::invalid_state);
     assert_void_error(backend.close_handle(token), voris::io::vio_error_code::invalid_state);
 
-    assert(iocp_detail::queue_iocp_test_packet(backend, key, 0U, overlapped,
-                                               iocp_detail::iocp_status_success)
-               .has_value());
     auto polled = backend.poll();
     assert(polled.has_value());
     assert(*polled == 1);
@@ -685,6 +809,13 @@ void test_register_associates_valid_handle_and_rejects_duplicate_and_stale_token
     assert(drained.has_value());
     assert(*drained == 1);
     assert_closed_completion(completions[0], 11);
+
+    assert(iocp_detail::queue_iocp_test_packet(backend, key, 0U, overlapped,
+                                               iocp_detail::iocp_status_success)
+               .has_value());
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
     drained = backend.drain_completions(completions);
     assert(drained.has_value());
     assert(*drained == 0);
@@ -786,14 +917,23 @@ void test_close_completes_pending_work_once_and_does_not_close_caller_handle() {
     void* closed_abort_overlapped =
         require_overlapped(iocp_detail::iocp_overlapped_for(backend, 23));
     assert(backend.cancel(21, voris::io::cancellation_reason::manual).has_value());
+    assert(iocp_detail::iocp_operation_storage_count(backend) == 2);
 
     assert(backend.close_handle(token).has_value());
     assert_handle_is_still_open(file.get());
 
     std::array<voris::io::backend_completion, 4> completions{};
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 3);
+
     auto drained = backend.drain_completions(completions);
     assert(drained.has_value());
-    assert(*drained == 0);
+    assert(*drained == 3);
+    assert_cancelled_completion(completions[0], 21, "manual");
+    assert_closed_completion(completions[1], 22);
+    assert_closed_completion(completions[2], 23);
+    assert(iocp_detail::iocp_active_operation_id_count(backend) == 0);
 
     assert(iocp_detail::queue_iocp_test_packet(backend, key, 0U, read_overlapped,
                                                iocp_detail::iocp_status_operation_aborted)
@@ -804,16 +944,10 @@ void test_close_completes_pending_work_once_and_does_not_close_caller_handle() {
     assert(iocp_detail::queue_iocp_test_packet(backend, key, 0U, closed_abort_overlapped,
                                                iocp_detail::iocp_status_operation_aborted)
                .has_value());
-    auto polled = backend.poll();
+    polled = backend.poll();
     assert(polled.has_value());
     assert(*polled == 3);
 
-    drained = backend.drain_completions(completions);
-    assert(drained.has_value());
-    assert(*drained == 3);
-    assert_cancelled_completion(completions[0], 21, "manual");
-    assert_closed_completion(completions[1], 22);
-    assert_closed_completion(completions[2], 23);
     drained = backend.drain_completions(completions);
     assert(drained.has_value());
     assert(*drained == 0);
@@ -833,6 +967,7 @@ void test_shutdown_preserves_explicit_cancel_reason_for_provider_abort() {
 
     assert(backend.submit(file_operation(24, voris::io::backend_operation_kind::read, token))
                .has_value());
+    assert(iocp_detail::mark_iocp_operation_native_submitted(backend, 24).has_value());
     void* overlapped = require_overlapped(iocp_detail::iocp_overlapped_for(backend, 24));
     assert(backend.cancel(24, voris::io::cancellation_reason::manual).has_value());
 
@@ -853,17 +988,57 @@ void test_shutdown_preserves_explicit_cancel_reason_for_provider_abort() {
     assert(backend.shutdown().has_value());
 }
 
-void test_shutdown_is_idempotent_closes_port_and_drains_pending_work() {
+void test_shutdown_final_completion_with_extra_stale_packet_is_robust() {
     namespace iocp_detail = voris::io::backends::detail;
 
     auto file = make_overlapped_temp_file();
-    voris::io::backends::iocp_backend backend;
+    voris::io::backends::iocp_backend backend{
+        voris::io::backends::iocp_backend_options{
+            .completion_batch_limit = 2,
+            .native_packet_capacity = 2,
+        }};
     const auto token = require_token(backend.register_handle(native_handle_value(file.get())));
     const auto key = require_completion_key(iocp_detail::iocp_completion_key_for(backend, token));
 
+    assert(backend.submit(file_operation(29, voris::io::backend_operation_kind::read, token))
+               .has_value());
+    assert(iocp_detail::mark_iocp_operation_native_submitted(backend, 29).has_value());
+    void* overlapped = require_overlapped(iocp_detail::iocp_overlapped_for(backend, 29));
+
+    assert(backend.shutdown().has_value());
+    assert(iocp_detail::queue_iocp_test_packet(backend, key, 0U, overlapped,
+                                               iocp_detail::iocp_status_success)
+               .has_value());
+    assert(iocp_detail::queue_iocp_test_packet(backend, key, 0U,
+                                               reinterpret_cast<void*>(0x29),
+                                               iocp_detail::iocp_status_success)
+               .has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 1);
+    assert(iocp_detail::iocp_native_packet_count(backend) == 0);
+
+    auto visible = backend.poll();
+    assert(visible.has_value());
+    assert(*visible == 1);
+
+    std::array<voris::io::backend_completion, 2> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_closed_completion(completions[0], 29);
+
+    assert_size_error(backend.poll(), voris::io::vio_error_code::closed);
+}
+
+void test_shutdown_is_idempotent_closes_port_and_drains_pending_work() {
+    auto file = make_overlapped_temp_file();
+    voris::io::backends::iocp_backend backend;
+    const auto token = require_token(backend.register_handle(native_handle_value(file.get())));
+
     assert(backend.submit(file_operation(31, voris::io::backend_operation_kind::fsync, token))
                .has_value());
-    void* overlapped = require_overlapped(iocp_detail::iocp_overlapped_for(backend, 31));
     assert(backend.shutdown().has_value());
     assert(backend.shutdown().has_value());
 
@@ -878,15 +1053,8 @@ void test_shutdown_is_idempotent_closes_port_and_drains_pending_work() {
     assert_void_error(backend.wake(), voris::io::vio_error_code::closed);
     auto polled = backend.poll();
     assert(polled.has_value());
-    assert(*polled == 0);
-    assert_handle_is_still_open(file.get());
-
-    assert(iocp_detail::queue_iocp_test_packet(backend, key, 0U, overlapped,
-                                               iocp_detail::iocp_status_success)
-               .has_value());
-    polled = backend.poll();
-    assert(polled.has_value());
     assert(*polled == 1);
+    assert_handle_is_still_open(file.get());
 
     std::array<voris::io::backend_completion, 2> completions{};
     auto drained = backend.drain_completions(completions);
@@ -920,16 +1088,20 @@ int main() {
     test_current_native_packet_backlog_is_bounded_and_drainable();
     test_old_generation_native_packet_is_cleanup_only();
     test_active_native_storage_is_stable_and_retained_until_completion();
+    test_synthetic_cancel_records_first_reason_and_completes_once();
     test_native_completion_maps_by_overlapped_once_and_unknown_is_cleanup_only();
-    test_cancel_records_first_reason_and_waits_for_native_cancel_completion();
-    test_close_waits_for_original_native_completion_and_reports_closed();
-    test_shutdown_keeps_port_until_active_native_completion_is_observed();
+    test_native_cancel_records_first_reason_and_waits_for_provider_completion();
+    test_synthetic_close_completes_without_native_packet_and_rejects_late_cancel();
+    test_native_close_waits_for_original_completion_and_rejects_late_cancel();
+    test_synthetic_shutdown_completes_without_native_packet_and_releases_on_drain();
+    test_native_shutdown_keeps_port_until_active_completion_is_observed();
     test_generation_reuse_does_not_misattribute_old_overlapped_completion();
     test_register_associates_valid_handle_and_rejects_duplicate_and_stale_tokens();
     test_association_failure_rolls_back_registry_state();
     test_closed_association_reuses_capacity_with_stale_safe_generation();
     test_close_completes_pending_work_once_and_does_not_close_caller_handle();
     test_shutdown_preserves_explicit_cancel_reason_for_provider_abort();
+    test_shutdown_final_completion_with_extra_stale_packet_is_robust();
     test_shutdown_is_idempotent_closes_port_and_drains_pending_work();
 
     auto file = make_overlapped_temp_file();

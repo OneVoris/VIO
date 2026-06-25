@@ -115,6 +115,9 @@ struct iocp_native_completion_packet {
                                                  std::uintptr_t internal_status);
 [[nodiscard]] io_result<void*> iocp_overlapped_for(iocp_backend& backend,
                                                    std::size_t operation_id);
+[[nodiscard]] void_result mark_iocp_operation_native_submitted(
+    iocp_backend& backend,
+    std::size_t operation_id);
 [[nodiscard]] std::size_t iocp_operation_storage_count(
     const iocp_backend& backend) noexcept;
 [[nodiscard]] std::size_t iocp_active_operation_id_count(
@@ -176,6 +179,9 @@ private:
         std::uintptr_t internal_status);
     friend io_result<void*> detail::iocp_overlapped_for(iocp_backend& backend,
                                                         std::size_t operation_id);
+    friend void_result detail::mark_iocp_operation_native_submitted(
+        iocp_backend& backend,
+        std::size_t operation_id);
     friend std::size_t detail::iocp_operation_storage_count(
         const iocp_backend& backend) noexcept;
     friend std::size_t detail::iocp_active_operation_id_count(
@@ -209,10 +215,11 @@ private:
     [[nodiscard]] void_result validate_operation_for_submit(
         const backend_operation& operation) const;
     [[nodiscard]] void_result request_cancel_for(operation_storage& storage);
-    void mark_close_requested(backend_handle_token token);
-    void mark_shutdown_requested();
+    [[nodiscard]] void_result mark_close_requested(backend_handle_token token);
+    [[nodiscard]] void_result mark_shutdown_requested();
     [[nodiscard]] std::size_t observe_queued_native_packets();
     void observe_native_packet(const detail::iocp_native_completion_packet& packet);
+    void complete_operation_storage(operation_storage& storage, void_result result);
     void complete_native_operation(operation_storage& storage,
                                    std::size_t bytes_transferred,
                                    std::uintptr_t internal_status);

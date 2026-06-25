@@ -71,6 +71,7 @@ struct iocp_backend::operation_storage {
     std::optional<cancellation_reason> cancellation{};
     bool cancel_requested{};
     bool close_requested{};
+    bool native_submitted{};
 
 #if defined(_WIN32)
     OVERLAPPED overlapped{};
@@ -311,6 +312,9 @@ void_result iocp_backend::request_cancel_for(operation_storage& storage) {
     if (storage.cancel_requested) {
         return {};
     }
+    if (!storage.native_submitted) {
+        return {};
+    }
 
 #if defined(_WIN32)
     const auto handle = reinterpret_cast<HANDLE>(storage.operation.handle.native_handle);
@@ -326,32 +330,83 @@ void_result iocp_backend::request_cancel_for(operation_storage& storage) {
     return {};
 }
 
-void iocp_backend::mark_close_requested(backend_handle_token token) {
-    for (auto& [operation_id, storage] : operations_) {
-        (void)operation_id;
+void_result iocp_backend::mark_close_requested(backend_handle_token token) {
+    std::vector<std::size_t> operation_ids;
+    for (const auto& [operation_id, storage] : operations_) {
         if (storage->operation.handle == token) {
-            storage->close_requested = true;
-            (void)request_cancel_for(*storage);
+            operation_ids.push_back(operation_id);
         }
     }
+
+    std::optional<vio_error> first_error;
+    for (const auto operation_id : operation_ids) {
+        auto found = operations_.find(operation_id);
+        if (found == operations_.end()) {
+            continue;
+        }
+
+        auto& storage = *found->second;
+        storage.close_requested = true;
+        if (!storage.native_submitted) {
+            complete_operation_storage(storage, closed_completion());
+            continue;
+        }
+
+        auto cancelled = request_cancel_for(storage);
+        if (!cancelled.has_value() && !first_error.has_value()) {
+            first_error = cancelled.error();
+        }
+    }
+
+    if (first_error.has_value()) {
+        return std::unexpected(*first_error);
+    }
+    return {};
 }
 
-void iocp_backend::mark_shutdown_requested() {
-    for (auto& [operation_id, storage] : operations_) {
-        (void)operation_id;
-        storage->close_requested = true;
-        (void)request_cancel_for(*storage);
+void_result iocp_backend::mark_shutdown_requested() {
+    std::vector<std::size_t> operation_ids;
+    operation_ids.reserve(operations_.size());
+    for (const auto& [operation_id, storage] : operations_) {
+        (void)storage;
+        operation_ids.push_back(operation_id);
     }
+
+    std::optional<vio_error> first_error;
+    for (const auto operation_id : operation_ids) {
+        auto found = operations_.find(operation_id);
+        if (found == operations_.end()) {
+            continue;
+        }
+
+        auto& storage = *found->second;
+        storage.close_requested = true;
+        if (!storage.native_submitted) {
+            complete_operation_storage(storage, closed_completion());
+            continue;
+        }
+
+        auto cancelled = request_cancel_for(storage);
+        if (!cancelled.has_value() && !first_error.has_value()) {
+            first_error = cancelled.error();
+        }
+    }
+
+    if (first_error.has_value()) {
+        return std::unexpected(*first_error);
+    }
+    return {};
 }
 
 std::size_t iocp_backend::observe_queued_native_packets() {
-    const auto count = std::min(options_.completion_batch_limit, native_packets_.size());
-    for (std::size_t index = 0; index < count; ++index) {
+    std::size_t observed = 0;
+    while (observed < options_.completion_batch_limit && !native_packets_.empty()) {
         const auto packet = native_packets_.front();
         native_packets_.pop_front();
         observe_native_packet(packet);
+        ++observed;
     }
-    return count;
+    return observed;
 }
 
 void iocp_backend::observe_native_packet(
@@ -378,6 +433,17 @@ void iocp_backend::observe_native_packet(
     }
 
     complete_native_operation(storage, packet.bytes_transferred, packet.internal_status);
+}
+
+void iocp_backend::complete_operation_storage(operation_storage& storage,
+                                              void_result result) {
+    backend_completion completion{};
+    completion.operation_id = storage.operation.id;
+    completion.result = std::move(result);
+
+    const auto operation_id = storage.operation.id;
+    completion_queue_.push_back(std::move(completion));
+    erase_operation_storage(operation_id);
 }
 
 void iocp_backend::complete_native_operation(operation_storage& storage,
@@ -494,6 +560,23 @@ io_result<void*> detail::iocp_overlapped_for(iocp_backend& backend,
                                           "IOCP operation id has no active storage"));
     }
     return found->second->overlapped_address();
+#else
+    (void)backend;
+    (void)operation_id;
+    return std::unexpected(unsupported_error());
+#endif
+}
+
+void_result detail::mark_iocp_operation_native_submitted(iocp_backend& backend,
+                                                         std::size_t operation_id) {
+#if defined(_WIN32)
+    auto found = backend.operations_.find(operation_id);
+    if (found == backend.operations_.end()) {
+        return std::unexpected(make_error(vio_error_code::invalid_state,
+                                          "IOCP operation id has no active storage"));
+    }
+    found->second->native_submitted = true;
+    return {};
 #else
     (void)backend;
     (void)operation_id;
@@ -730,10 +813,19 @@ void_result iocp_backend::cancel(std::size_t operation_id, cancellation_reason r
         return std::unexpected(invalid_state_error("operation id is not active"));
     }
 
-    if (!found->second->cancellation.has_value()) {
-        found->second->cancellation = reason;
+    auto& storage = *found->second;
+    if (storage.close_requested) {
+        return closed_error();
     }
-    return request_cancel_for(*found->second);
+    if (!storage.cancellation.has_value()) {
+        storage.cancellation = reason;
+    }
+    const auto first_reason = *storage.cancellation;
+    if (!storage.native_submitted) {
+        complete_operation_storage(storage, cancelled_completion(first_reason));
+        return {};
+    }
+    return request_cancel_for(storage);
 #else
     (void)operation_id;
     (void)reason;
@@ -752,13 +844,13 @@ void_result iocp_backend::close_handle(backend_handle_token token) {
     if (!fallback_.is_current_handle(token)) {
         return std::unexpected(invalid_state_error("backend handle token is not current"));
     }
-    mark_close_requested(token);
+    auto marked = mark_close_requested(token);
     auto closed = fallback_.close_handle(token);
     if (!closed.has_value()) {
         return closed;
     }
     close_association(token);
-    return {};
+    return marked;
 #else
     (void)token;
     return std::unexpected(unsupported_error());
@@ -767,6 +859,9 @@ void_result iocp_backend::close_handle(backend_handle_token token) {
 
 io_result<std::size_t> iocp_backend::poll() {
 #if defined(_WIN32)
+    if (!completion_queue_.empty()) {
+        return completion_queue_.size();
+    }
     if (stopped_ && operations_.empty() && completion_port_ == nullptr) {
         return std::unexpected(make_error(vio_error_code::closed));
     }
@@ -832,10 +927,13 @@ void_result iocp_backend::shutdown() {
         return {};
     }
 
-    mark_shutdown_requested();
+    auto marked = mark_shutdown_requested();
     stopped_ = true;
     auto drained = fallback_.shutdown();
     maybe_close_stopped_port();
+    if (!marked.has_value()) {
+        return marked;
+    }
     return drained;
 #else
     return fallback_.shutdown();
