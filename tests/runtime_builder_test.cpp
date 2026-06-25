@@ -3,6 +3,7 @@
 #include "test_assert.hpp"
 
 #include <chrono>
+#include <limits>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -95,6 +96,25 @@ int main() {
         assert(created->shard_cpu_affinity(0) == std::optional<std::size_t>(3));
         assert(created->shard_cpu_affinity(1) == std::optional<std::size_t>(4));
         assert(created->shard_cpu_affinity(2) == std::optional<std::size_t>(5));
+    }
+
+    {
+        runtime_options invalid;
+        invalid.shard_count = 2;
+        invalid.cpu_affinity_start = std::numeric_limits<std::size_t>::max();
+        auto invalid_runtime = runtime::create(invalid);
+        assert(!invalid_runtime.has_value());
+        assert(invalid_runtime.error().classification == vio_error_code::invalid_state);
+    }
+
+    {
+        runtime_options options;
+        options.shard_count = 1;
+        options.cpu_affinity_start = std::numeric_limits<std::size_t>::max();
+        auto created = runtime::create(options);
+        assert(created.has_value());
+        assert(created->shard_cpu_affinity(0) ==
+               std::optional<std::size_t>(std::numeric_limits<std::size_t>::max()));
     }
 
     {
