@@ -4,10 +4,12 @@
 #include <chrono>
 #include <cstddef>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include <voris/io/backend_wakeup.hpp>
 #include <voris/io/detail/mailbox.hpp>
+#include <voris/io/error.hpp>
 #include <voris/io/loop_budget.hpp>
 #include <voris/io/runtime_metrics.hpp>
 #include <voris/io/scheduler.hpp>
@@ -38,6 +40,7 @@ public:
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::thread::id thread_id() const noexcept;
     [[nodiscard]] runtime_metrics metrics() const;
+    [[nodiscard]] std::optional<vio_error> last_loop_error() const;
 
     // Observes worker parked state at the wakeup wait; not a loop budget or metrics API.
     template<class Rep, class Period>
@@ -53,6 +56,7 @@ private:
     loop_budget budget_;
     backend_wakeup wakeup_;
     runtime_metrics metrics_;
+    std::optional<vio_error> loop_error_;
     mutable std::mutex metrics_mutex_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};

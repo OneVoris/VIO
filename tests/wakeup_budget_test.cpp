@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 int main() {
     using namespace voris::io;
@@ -278,6 +279,21 @@ int main() {
         assert(second_turn.has_value());
         assert(*second_turn == 1);
         assert(order == std::vector<int>({1, 2}));
+    }
+
+    {
+        shard worker(4, loop_budget{.task_budget = 0, .completion_budget = 8, .timer_budget = 8});
+        bool ran = false;
+        assert(worker.submit([&ran] { ran = true; }).has_value());
+
+        worker.start();
+        worker.join();
+
+        auto error = worker.last_loop_error();
+        assert(error.has_value());
+        assert(error->classification == vio_error_code::invalid_state);
+        assert(!ran);
+        assert(worker.metrics().completed_tasks == 0);
     }
 
     return 0;

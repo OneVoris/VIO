@@ -80,6 +80,10 @@ void shard::start() {
     if (running_.exchange(true)) {
         return;
     }
+    {
+        std::lock_guard lock(metrics_mutex_);
+        loop_error_.reset();
+    }
     stop_requested_ = false;
     thread_ = std::thread([this] { run_loop(); });
 }
@@ -109,13 +113,25 @@ runtime_metrics shard::metrics() const {
     return metrics_;
 }
 
+std::optional<vio_error> shard::last_loop_error() const {
+    std::lock_guard lock(metrics_mutex_);
+    return loop_error_;
+}
+
 void shard::run_loop() {
     thread_id_ = std::this_thread::get_id();
     current_scheduler_scope scope(scheduler());
+    bool drain_on_exit = true;
     while (!stop_requested_) {
         auto ran = run_one_loop_iteration();
         if (!ran.has_value()) {
+            {
+                std::lock_guard lock(metrics_mutex_);
+                loop_error_ = ran.error();
+                metrics_.queue_depth = mailbox_.size();
+            }
             stop_requested_ = true;
+            drain_on_exit = false;
             break;
         }
         if (*ran == 0) {
@@ -123,7 +139,9 @@ void shard::run_loop() {
             (void)wakeup_.consume_all();
         }
     }
-    (void)drain();
+    if (drain_on_exit) {
+        (void)drain();
+    }
 }
 
 } // namespace voris::io
