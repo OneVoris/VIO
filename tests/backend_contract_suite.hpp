@@ -2,6 +2,7 @@
 
 #include <voris/io/backend.hpp>
 #include <voris/io/backends/epoll_backend.hpp>
+#include <voris/io/backends/io_uring_backend.hpp>
 
 #include <array>
 #include <cstddef>
@@ -102,6 +103,8 @@ public:
         return queued_completions;
     }
 
+    void make_pending_completions_visible() noexcept {}
+
     voris::io::virtual_backend backend{};
 
 private:
@@ -189,6 +192,8 @@ public:
         return 0;
     }
 
+    void make_pending_completions_visible() noexcept {}
+
     voris::io::backends::epoll_backend backend{};
 
 private:
@@ -205,6 +210,64 @@ private:
     std::vector<unique_fd> handles_{};
 };
 #endif
+
+inline voris::io::backends::io_uring_capabilities io_uring_contract_capabilities()
+    noexcept {
+    return voris::io::backends::io_uring_capabilities{
+        .available = true,
+        .supports_read = true,
+        .supports_write = true,
+        .supports_accept = true,
+        .supports_connect = true,
+        .supports_files = true,
+        .supports_fsync = true,
+        .supports_cancel = true,
+    };
+}
+
+inline voris::io::backends::io_uring_backend_options io_uring_contract_options()
+    noexcept {
+    return voris::io::backends::io_uring_backend_options{
+        .submission_queue_capacity = 64,
+        .submit_batch_limit = 32,
+        .completion_batch_limit = 32,
+        .enable_kernel_submission = false,
+    };
+}
+
+class io_uring_contract_fixture {
+public:
+    [[nodiscard]] std::size_t make_native_handle() noexcept {
+        return next_native_handle_++;
+    }
+
+    [[nodiscard]] std::size_t invalid_native_handle() const noexcept {
+        return 0;
+    }
+
+    [[nodiscard]] std::size_t recreate_native_handle_with_same_number(
+        std::size_t native_handle) noexcept {
+        return native_handle;
+    }
+
+    [[nodiscard]] std::size_t expected_poll_count_after_close(
+        std::size_t queued_completions) const noexcept {
+        return queued_completions;
+    }
+
+    void make_pending_completions_visible() {
+        auto polled = backend.poll();
+        assert(polled.has_value());
+    }
+
+    voris::io::backends::io_uring_backend backend{
+        io_uring_contract_capabilities(),
+        io_uring_contract_options(),
+    };
+
+private:
+    std::size_t next_native_handle_{1};
+};
 
 template <class Fixture>
 void test_register_valid_handle_returns_token_and_invalid_handle_is_rejected() {
@@ -304,6 +367,7 @@ void test_close_one_handle_does_not_complete_another_handles_pending_operations(
     assert(fixture.backend.submit(operation(22, backend_operation_kind::read, second)).has_value());
 
     assert(fixture.backend.close_handle(first).has_value());
+    fixture.make_pending_completions_visible();
 
     std::array<backend_completion, 8> completions{};
     assert(drain(fixture.backend, completions) == 1);
@@ -311,6 +375,7 @@ void test_close_one_handle_does_not_complete_another_handles_pending_operations(
     assert(drain(fixture.backend, completions) == 0);
 
     assert(fixture.backend.close_handle(second).has_value());
+    fixture.make_pending_completions_visible();
     assert(drain(fixture.backend, completions) == 1);
     assert_completion_error(completions[0], 22, vio_error_code::closed);
 }
@@ -330,12 +395,14 @@ void test_operation_id_cannot_reuse_until_queued_completion_is_drained() {
     assert_void_error(fixture.backend.submit(operation(77, backend_operation_kind::write, other)),
                       vio_error_code::invalid_state);
 
+    fixture.make_pending_completions_visible();
     std::array<backend_completion, 4> completions{};
     assert(drain(fixture.backend, completions) == 1);
     assert_completion_error(completions[0], 77, vio_error_code::closed);
 
     assert(fixture.backend.submit(operation(77, backend_operation_kind::write, other)).has_value());
     assert(fixture.backend.close_handle(other).has_value());
+    fixture.make_pending_completions_visible();
     assert(drain(fixture.backend, completions) == 1);
     assert_completion_error(completions[0], 77, vio_error_code::closed);
 }
@@ -460,6 +527,51 @@ inline void run_epoll_backend_contract_suite() {
     assert_size_error(backend.drain_completions(completions), vio_error_code::unsupported);
     assert_void_error(backend.wake(), vio_error_code::unsupported);
     assert(backend.shutdown().has_value());
+#endif
+}
+
+inline void run_io_uring_backend_contract_suite() {
+    run_backend_contract_suite<io_uring_contract_fixture>();
+
+    using namespace voris::io;
+
+    io_uring_contract_fixture fixture;
+    const auto token = require_token(fixture.backend.register_handle(fixture.make_native_handle()));
+    std::array<std::byte, 1> read_buffer{};
+    const std::array<std::byte, 1> write_buffer{std::byte{'x'}};
+    auto file_read = file_operation(154, backend_operation_kind::read, token);
+    file_read.read_buffer = read_buffer;
+    auto file_write = file_operation(155, backend_operation_kind::write, token);
+    file_write.write_buffer = write_buffer;
+
+    assert(fixture.backend.submit(file_read).has_value());
+    assert(fixture.backend.submit(file_write).has_value());
+    assert(fixture.backend.submit(file_operation(156, backend_operation_kind::fsync, token))
+               .has_value());
+
+    assert(fixture.backend.close_handle(token).has_value());
+    assert_poll_count(fixture.backend, fixture.expected_poll_count_after_close(3));
+
+    std::array<backend_completion, 4> completions{};
+    assert(drain(fixture.backend, completions) == 3);
+    assert_completion_error(completions[0], 154, vio_error_code::closed);
+    assert_completion_error(completions[1], 155, vio_error_code::closed);
+    assert_completion_error(completions[2], 156, vio_error_code::closed);
+
+#if !defined(__linux__)
+    backends::io_uring_backend unavailable;
+    assert_token_error(unavailable.register_handle(1), vio_error_code::unsupported);
+    assert_void_error(unavailable.submit(operation(1, backend_operation_kind::read, {1, 1})),
+                      vio_error_code::unsupported);
+    assert_void_error(unavailable.cancel(1, cancellation_reason::manual),
+                      vio_error_code::unsupported);
+    assert_void_error(unavailable.close_handle({1, 1}), vio_error_code::unsupported);
+    assert_size_error(unavailable.poll(), vio_error_code::unsupported);
+    std::array<backend_completion, 1> unavailable_completions{};
+    assert_size_error(unavailable.drain_completions(unavailable_completions),
+                      vio_error_code::unsupported);
+    assert_void_error(unavailable.wake(), vio_error_code::unsupported);
+    assert(unavailable.shutdown().has_value());
 #endif
 }
 
