@@ -115,20 +115,25 @@ void test_batch_and_native_packet_limits_are_normalized_and_capped() {
         voris::io::backends::iocp_backend_options{
             .completion_batch_limit = 0,
             .native_packet_capacity = 0,
+            .association_capacity = 0,
         }};
     assert(backend.completion_batch_limit() == 1);
     assert(backend.native_packet_capacity() == 1);
+    assert(backend.association_capacity() == 1);
     assert(backend.shutdown().has_value());
 
     voris::io::backends::iocp_backend huge_limits{
         voris::io::backends::iocp_backend_options{
             .completion_batch_limit = std::numeric_limits<std::size_t>::max(),
             .native_packet_capacity = std::numeric_limits<std::size_t>::max(),
+            .association_capacity = std::numeric_limits<std::size_t>::max(),
         }};
     assert(huge_limits.completion_batch_limit() ==
            voris::io::backends::detail::iocp_max_completion_batch_limit);
     assert(huge_limits.native_packet_capacity() ==
            voris::io::backends::detail::iocp_max_native_packet_capacity);
+    assert(huge_limits.association_capacity() ==
+           voris::io::backends::detail::iocp_max_association_count);
     assert(huge_limits.shutdown().has_value());
 }
 
@@ -347,18 +352,72 @@ void test_register_associates_valid_handle_and_rejects_duplicate_and_stale_token
 }
 
 void test_association_failure_rolls_back_registry_state() {
-    voris::io::backends::iocp_backend backend;
+    voris::io::backends::iocp_backend backend{
+        voris::io::backends::iocp_backend_options{.association_capacity = 1}};
     constexpr std::size_t invalid_nonzero_handle = 1U;
 
-    auto failed = backend.register_handle(invalid_nonzero_handle);
-    assert(!failed.has_value());
-    assert(failed.error().classification == voris::io::vio_error_code::backend_failure);
-    assert(failed.error().provider_code.has_value());
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        auto failed = backend.register_handle(invalid_nonzero_handle);
+        assert(!failed.has_value());
+        assert(failed.error().classification == voris::io::vio_error_code::backend_failure);
+        assert(failed.error().provider_code.has_value());
+    }
 
-    auto retried = backend.register_handle(invalid_nonzero_handle);
-    assert(!retried.has_value());
-    assert(retried.error().classification == voris::io::vio_error_code::backend_failure);
-    assert(retried.error().provider_code.has_value());
+    assert(backend.association_capacity() == 1);
+
+    assert(backend.shutdown().has_value());
+}
+
+void test_closed_association_reuses_capacity_with_stale_safe_generation() {
+    namespace iocp_detail = voris::io::backends::detail;
+
+    voris::io::backends::iocp_backend backend{
+        voris::io::backends::iocp_backend_options{
+            .completion_batch_limit = 2,
+            .native_packet_capacity = 2,
+            .association_capacity = 1,
+        }};
+
+    iocp_detail::iocp_completion_key_token previous_key{};
+    bool has_previous_key = false;
+    for (std::size_t iteration = 0; iteration < 4; ++iteration) {
+        auto file = make_overlapped_temp_file();
+        const auto token =
+            require_token(backend.register_handle(native_handle_value(file.get())));
+        const auto key =
+            require_completion_key(iocp_detail::iocp_completion_key_for(backend, token));
+        assert(key.association_id == 1U);
+
+        if (has_previous_key) {
+            assert(key.association_id == previous_key.association_id);
+            assert(key.generation > previous_key.generation);
+
+            assert(iocp_detail::post_iocp_test_packet(backend, previous_key, 29U, nullptr)
+                       .has_value());
+            auto polled = backend.poll();
+            assert(polled.has_value());
+            assert(*polled == 1);
+            assert(iocp_detail::iocp_native_packet_count(backend) == 0);
+        }
+
+        assert(iocp_detail::post_iocp_test_packet(backend, key, 31U, nullptr).has_value());
+        auto polled = backend.poll();
+        assert(polled.has_value());
+        assert(*polled == 1);
+        assert(iocp_detail::iocp_native_packet_count(backend) == 1);
+
+        std::array<iocp_detail::iocp_native_completion_packet, 1> native_packets{};
+        auto drained_native = iocp_detail::drain_iocp_native_packets(backend, native_packets);
+        assert(drained_native.has_value());
+        assert(*drained_native == 1);
+        assert(native_packets[0].handle == token);
+        assert(native_packets[0].completion_key.association_id == key.association_id);
+        assert(native_packets[0].completion_key.generation == key.generation);
+
+        assert(backend.close_handle(token).has_value());
+        previous_key = key;
+        has_previous_key = true;
+    }
 
     assert(backend.shutdown().has_value());
 }
@@ -445,6 +504,7 @@ int main() {
     test_old_generation_native_packet_is_cleanup_only();
     test_register_associates_valid_handle_and_rejects_duplicate_and_stale_tokens();
     test_association_failure_rolls_back_registry_state();
+    test_closed_association_reuses_capacity_with_stale_safe_generation();
     test_close_completes_pending_work_once_and_does_not_close_caller_handle();
     test_shutdown_is_idempotent_closes_port_and_drains_pending_work();
 

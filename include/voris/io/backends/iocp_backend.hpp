@@ -114,6 +114,8 @@ struct iocp_backend_options {
     std::size_t completion_batch_limit{detail::iocp_default_completion_batch_limit};
     // Zero means "match the normalized completion batch limit".
     std::size_t native_packet_capacity{};
+    // Zero is normalized to one reusable association slot.
+    std::size_t association_capacity{detail::iocp_max_association_count};
 };
 
 class iocp_backend final : public backend {
@@ -126,6 +128,7 @@ public:
 
     [[nodiscard]] std::size_t completion_batch_limit() const noexcept;
     [[nodiscard]] std::size_t native_packet_capacity() const noexcept;
+    [[nodiscard]] std::size_t association_capacity() const noexcept;
 
     [[nodiscard]] io_result<backend_handle_token> register_handle(
         std::size_t native_handle) override;
@@ -156,7 +159,10 @@ private:
     struct association_entry {
         std::size_t id{};
         backend_handle_token token{};
+        std::size_t generation{};
         bool open{};
+        bool reusable{};
+        bool bump_generation_on_reuse{};
     };
 
     [[nodiscard]] io_result<detail::iocp_completion_key_token> create_association(
@@ -178,6 +184,7 @@ private:
     virtual_backend fallback_;
     std::deque<detail::iocp_native_completion_packet> native_packets_{};
     std::vector<association_entry> associations_{};
+    std::vector<std::size_t> free_association_ids_{};
     std::unordered_map<std::size_t, std::size_t> association_by_native_handle_{};
     void* completion_port_{};
     bool stopped_{false};

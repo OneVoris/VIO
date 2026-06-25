@@ -50,6 +50,12 @@ iocp_backend::iocp_backend(iocp_backend_options options) : options_(options) {
     options_.native_packet_capacity =
         std::min(options_.native_packet_capacity,
                  detail::iocp_max_native_packet_capacity);
+    if (options_.association_capacity == 0) {
+        options_.association_capacity = 1;
+    }
+    options_.association_capacity =
+        std::min(options_.association_capacity,
+                 detail::iocp_max_association_count);
 
 #if defined(_WIN32)
     completion_port_ =
@@ -74,22 +80,71 @@ std::size_t iocp_backend::native_packet_capacity() const noexcept {
     return options_.native_packet_capacity;
 }
 
+std::size_t iocp_backend::association_capacity() const noexcept {
+    return options_.association_capacity;
+}
+
 io_result<detail::iocp_completion_key_token> iocp_backend::create_association(
     backend_handle_token token) {
-    if (associations_.size() >= detail::iocp_max_association_count) {
+    while (!free_association_ids_.empty()) {
+        const auto association_id = free_association_ids_.back();
+        free_association_ids_.pop_back();
+        if (association_id == 0 || association_id > associations_.size()) {
+            continue;
+        }
+
+        auto& entry = associations_[association_id - 1U];
+        if (entry.open || !entry.reusable) {
+            continue;
+        }
+
+        if (entry.bump_generation_on_reuse) {
+            if (entry.generation >= detail::iocp_completion_key_low_mask) {
+                entry.reusable = false;
+                entry.bump_generation_on_reuse = false;
+                continue;
+            }
+            ++entry.generation;
+        } else if (entry.generation == 0) {
+            entry.generation = 1U;
+        }
+
+        detail::iocp_completion_key_token key{association_id, entry.generation};
+        if (auto packed = detail::pack_iocp_completion_key(key); !packed.has_value()) {
+            entry.reusable = false;
+            entry.bump_generation_on_reuse = false;
+            return std::unexpected(packed.error());
+        }
+
+        entry.token = token;
+        entry.open = true;
+        entry.reusable = false;
+        entry.bump_generation_on_reuse = false;
+        association_by_native_handle_[token.native_handle] = association_id;
+        return key;
+    }
+
+    if (associations_.size() >= options_.association_capacity) {
         return std::unexpected(make_error(vio_error_code::resource_exhausted,
                                           "IOCP association table is full"));
     }
 
     detail::iocp_completion_key_token key{
         associations_.size() + 1U,
-        token.generation,
+        1U,
     };
     if (auto packed = detail::pack_iocp_completion_key(key); !packed.has_value()) {
         return std::unexpected(packed.error());
     }
 
-    associations_.push_back(association_entry{key.association_id, token, true});
+    associations_.push_back(association_entry{
+        key.association_id,
+        token,
+        key.generation,
+        true,
+        false,
+        false,
+    });
     association_by_native_handle_[token.native_handle] = key.association_id;
     return key;
 }
@@ -100,10 +155,19 @@ void iocp_backend::rollback_association(detail::iocp_completion_key_token key) n
     }
 
     auto& entry = associations_[key.association_id - 1U];
+    if (entry.generation != key.generation) {
+        return;
+    }
     entry.open = false;
     if (auto found = association_by_native_handle_.find(entry.token.native_handle);
         found != association_by_native_handle_.end() && found->second == key.association_id) {
         association_by_native_handle_.erase(found);
+    }
+    entry.token = {};
+    entry.bump_generation_on_reuse = false;
+    if (!entry.reusable) {
+        entry.reusable = true;
+        free_association_ids_.push_back(key.association_id);
     }
 }
 
@@ -123,6 +187,17 @@ void iocp_backend::close_association(backend_handle_token token) noexcept {
     if (entry.token == token) {
         entry.open = false;
         association_by_native_handle_.erase(found);
+        entry.token = {};
+        if (entry.generation < detail::iocp_completion_key_low_mask) {
+            entry.bump_generation_on_reuse = true;
+            if (!entry.reusable) {
+                entry.reusable = true;
+                free_association_ids_.push_back(association_id);
+            }
+        } else {
+            entry.reusable = false;
+            entry.bump_generation_on_reuse = false;
+        }
     }
 }
 
@@ -146,7 +221,7 @@ io_result<detail::iocp_completion_key_token> iocp_backend::completion_key_for(
                                           "IOCP handle token is not current"));
     }
 
-    return detail::iocp_completion_key_token{association_id, token.generation};
+    return detail::iocp_completion_key_token{association_id, entry.generation};
 }
 
 std::optional<backend_handle_token> iocp_backend::current_handle_for(
@@ -156,7 +231,7 @@ std::optional<backend_handle_token> iocp_backend::current_handle_for(
     }
 
     const auto& entry = associations_[key.association_id - 1U];
-    if (!entry.open || entry.token.generation != key.generation ||
+    if (!entry.open || entry.generation != key.generation ||
         !fallback_.is_current_handle(entry.token)) {
         return std::nullopt;
     }
@@ -460,6 +535,7 @@ void_result iocp_backend::shutdown() {
     native_packets_.clear();
     association_by_native_handle_.clear();
     associations_.clear();
+    free_association_ids_.clear();
     close_owned_port();
     return drained;
 #else
