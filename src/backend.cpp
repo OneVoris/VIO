@@ -177,13 +177,16 @@ void virtual_backend::complete_pending(backend_handle_token token,
                                        backend_operation_kind readiness_kind,
                                        const void_result& result) {
     for (auto iterator = pending_.begin(); iterator != pending_.end();) {
+        const bool is_socket_operation =
+            iterator->operation.target == backend_operation_target::socket;
         const bool kind_matches =
-            (readiness_kind == backend_operation_kind::read &&
-             (iterator->operation.kind == backend_operation_kind::read ||
-              iterator->operation.kind == backend_operation_kind::accept)) ||
-            (readiness_kind == backend_operation_kind::write &&
-             (iterator->operation.kind == backend_operation_kind::write ||
-              iterator->operation.kind == backend_operation_kind::connect));
+            is_socket_operation &&
+            ((readiness_kind == backend_operation_kind::read &&
+              (iterator->operation.kind == backend_operation_kind::read ||
+               iterator->operation.kind == backend_operation_kind::accept)) ||
+             (readiness_kind == backend_operation_kind::write &&
+              (iterator->operation.kind == backend_operation_kind::write ||
+               iterator->operation.kind == backend_operation_kind::connect)));
         if (iterator->operation.handle == token && kind_matches) {
             completions_.push_back(backend_completion{iterator->operation.id, result});
             iterator = pending_.erase(iterator);

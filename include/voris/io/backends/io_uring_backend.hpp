@@ -105,7 +105,7 @@ private:
 
     [[nodiscard]] bool use_kernel_submission() const noexcept;
     [[nodiscard]] bool has_inflight_kernel_work() const noexcept;
-    [[nodiscard]] void_result validate_kernel_socket_operation(
+    [[nodiscard]] void_result validate_kernel_operation(
         const backend_operation& operation) const;
     [[nodiscard]] void_result submit_to_fallback(queued_submission queued);
     [[nodiscard]] void_result submit_to_kernel(const queued_submission& queued);

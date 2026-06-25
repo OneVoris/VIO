@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <span>
 #include <unordered_set>
@@ -23,8 +24,14 @@ enum class backend_operation_kind {
     write,
     accept,
     connect,
+    fsync,
     close,
     wake,
+};
+
+enum class backend_operation_target {
+    socket,
+    file,
 };
 
 struct backend_handle_token {
@@ -38,6 +45,7 @@ struct backend_handle_token {
 struct backend_operation {
     std::size_t id{};
     backend_operation_kind kind{};
+    backend_operation_target target{backend_operation_target::socket};
     scheduler_ref scheduler{};
     backend_handle_token handle{};
     // Borrowed payload storage must remain alive until the operation reaches
@@ -46,6 +54,7 @@ struct backend_operation {
     std::span<std::byte> read_buffer{};
     std::span<const std::byte> write_buffer{};
     std::span<const std::byte> socket_address{};
+    std::uint64_t offset{};
 };
 
 struct backend_completion {

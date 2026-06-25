@@ -113,13 +113,17 @@ void apply_probe(io_uring_capabilities& capabilities,
 
 #endif
 
-[[nodiscard]] bool is_socket_operation_kind(backend_operation_kind kind) noexcept {
-    switch (kind) {
+[[nodiscard]] bool is_socket_operation(const backend_operation& operation) noexcept {
+    if (operation.target != backend_operation_target::socket) {
+        return false;
+    }
+    switch (operation.kind) {
     case backend_operation_kind::read:
     case backend_operation_kind::write:
     case backend_operation_kind::accept:
     case backend_operation_kind::connect:
         return true;
+    case backend_operation_kind::fsync:
     case backend_operation_kind::close:
     case backend_operation_kind::wake:
         return false;
@@ -128,10 +132,33 @@ void apply_probe(io_uring_capabilities& capabilities,
     return false;
 }
 
-[[nodiscard]] bool supports_operation_kind(
+[[nodiscard]] bool is_file_operation(const backend_operation& operation) noexcept {
+    if (operation.target != backend_operation_target::file) {
+        return false;
+    }
+    switch (operation.kind) {
+    case backend_operation_kind::read:
+    case backend_operation_kind::write:
+    case backend_operation_kind::fsync:
+        return true;
+    case backend_operation_kind::accept:
+    case backend_operation_kind::connect:
+    case backend_operation_kind::close:
+    case backend_operation_kind::wake:
+        return false;
+    }
+
+    return false;
+}
+
+[[nodiscard]] bool is_submit_operation(const backend_operation& operation) noexcept {
+    return is_socket_operation(operation) || is_file_operation(operation);
+}
+
+[[nodiscard]] bool supports_operation(
     const io_uring_capabilities& capabilities,
-    backend_operation_kind kind) noexcept {
-    switch (kind) {
+    const backend_operation& operation) noexcept {
+    switch (operation.kind) {
     case backend_operation_kind::read:
         return capabilities.supports_read;
     case backend_operation_kind::write:
@@ -140,6 +167,8 @@ void apply_probe(io_uring_capabilities& capabilities,
         return capabilities.supports_accept;
     case backend_operation_kind::connect:
         return capabilities.supports_connect;
+    case backend_operation_kind::fsync:
+        return capabilities.supports_fsync;
     case backend_operation_kind::close:
     case backend_operation_kind::wake:
         return false;
@@ -176,7 +205,7 @@ void apply_probe(io_uring_capabilities& capabilities,
 
 [[nodiscard]] vio_error cancellation_required_error() {
     return make_error(vio_error_code::unsupported,
-                      "io_uring socket operations require async cancel for close/shutdown liveness");
+                      "io_uring kernel operations require async cancel for close/shutdown liveness");
 }
 
 [[nodiscard]] void_result closed_completion() {
@@ -578,11 +607,11 @@ void_result io_uring_backend::submit(backend_operation operation) {
     if (!capabilities_.available) {
         return std::unexpected(unavailable_error());
     }
-    if (!is_socket_operation_kind(operation.kind)) {
+    if (!is_submit_operation(operation)) {
         return std::unexpected(
-            invalid_state_error("io_uring submit accepts socket operation kinds only"));
+            invalid_state_error("io_uring submit received an invalid operation target"));
     }
-    if (!supports_operation_kind(capabilities_, operation.kind)) {
+    if (!supports_operation(capabilities_, operation)) {
         return std::unexpected(opcode_unavailable_error());
     }
     if (operation.id == 0) {
@@ -599,7 +628,7 @@ void_result io_uring_backend::submit(backend_operation operation) {
         if (auto user_data = encode_operation_user_data(operation.id); !user_data.has_value()) {
             return std::unexpected(user_data.error());
         }
-        if (auto valid = validate_kernel_socket_operation(operation); !valid.has_value()) {
+        if (auto valid = validate_kernel_operation(operation); !valid.has_value()) {
             return valid;
         }
     }
@@ -785,10 +814,14 @@ bool io_uring_backend::has_inflight_kernel_work() const noexcept {
     return !kernel_operations_.empty() || !kernel_cancel_operation_ids_.empty();
 }
 
-void_result io_uring_backend::validate_kernel_socket_operation(
+void_result io_uring_backend::validate_kernel_operation(
     const backend_operation& operation) const {
     if (auto fd = native_handle_as_fd(operation.handle.native_handle); !fd.has_value()) {
         return std::unexpected(fd.error());
+    }
+    if (!is_submit_operation(operation)) {
+        return std::unexpected(
+            invalid_state_error("io_uring kernel submission received an invalid operation target"));
     }
 
     switch (operation.kind) {
@@ -803,8 +836,16 @@ void_result io_uring_backend::validate_kernel_socket_operation(
         }
         return {};
     case backend_operation_kind::accept:
+        if (operation.target != backend_operation_target::socket) {
+            return std::unexpected(
+                invalid_state_error("io_uring accept requires a socket target"));
+        }
         return {};
     case backend_operation_kind::connect:
+        if (operation.target != backend_operation_target::socket) {
+            return std::unexpected(
+                invalid_state_error("io_uring connect requires a socket target"));
+        }
         if (operation.socket_address.empty()) {
             return std::unexpected(
                 invalid_state_error("io_uring connect requires a socket address"));
@@ -817,10 +858,16 @@ void_result io_uring_backend::validate_kernel_socket_operation(
         }
 #endif
         return {};
+    case backend_operation_kind::fsync:
+        if (operation.target != backend_operation_target::file) {
+            return std::unexpected(
+                invalid_state_error("io_uring fsync requires a file target"));
+        }
+        return {};
     case backend_operation_kind::close:
     case backend_operation_kind::wake:
         return std::unexpected(
-            invalid_state_error("io_uring kernel submission requires a socket operation"));
+            invalid_state_error("io_uring kernel submission requires an I/O operation"));
     }
 
     return std::unexpected(
@@ -844,7 +891,7 @@ void_result io_uring_backend::submit_to_fallback(queued_submission queued) {
 
 void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) {
     const backend_operation& operation = queued.operation;
-    if (auto valid = validate_kernel_socket_operation(operation); !valid.has_value()) {
+    if (auto valid = validate_kernel_operation(operation); !valid.has_value()) {
         return valid;
     }
     if (queued.cancellation.has_value()) {
@@ -883,6 +930,7 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
             return std::unexpected(size.error());
         }
         opcode = IORING_OP_READ;
+        offset = operation.target == backend_operation_target::file ? operation.offset : 0U;
         address = reinterpret_cast<std::uintptr_t>(operation.read_buffer.data());
         length = *size;
         break;
@@ -893,6 +941,7 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
             return std::unexpected(size.error());
         }
         opcode = IORING_OP_WRITE;
+        offset = operation.target == backend_operation_target::file ? operation.offset : 0U;
         address = reinterpret_cast<std::uintptr_t>(operation.write_buffer.data());
         length = *size;
         break;
@@ -906,10 +955,13 @@ void_result io_uring_backend::submit_to_kernel(const queued_submission& queued) 
         offset = operation.socket_address.size();
         address = reinterpret_cast<std::uintptr_t>(operation.socket_address.data());
         break;
+    case backend_operation_kind::fsync:
+        opcode = IORING_OP_FSYNC;
+        break;
     case backend_operation_kind::close:
     case backend_operation_kind::wake:
         return std::unexpected(
-            invalid_state_error("io_uring kernel submission requires a socket operation"));
+            invalid_state_error("io_uring kernel submission requires an I/O operation"));
     }
 
     auto reservation = kernel_ring_->reserve_sqe();
@@ -1233,10 +1285,12 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
                 break;
             case backend_operation_kind::connect:
                 break;
+            case backend_operation_kind::fsync:
+                break;
             case backend_operation_kind::close:
             case backend_operation_kind::wake:
                 completion.result = std::unexpected(invalid_state_error(
-                    "unexpected non-socket io_uring completion"));
+                    "unexpected non-I/O io_uring completion"));
                 break;
             }
         }

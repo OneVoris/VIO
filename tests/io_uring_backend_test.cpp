@@ -1,6 +1,7 @@
 #include <voris/io/backends/io_uring_backend.hpp>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <deque>
@@ -13,6 +14,7 @@
 #if defined(__linux__)
 #include <arpa/inet.h>
 #include <cerrno>
+#include <cstdlib>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -66,6 +68,34 @@ voris::io::backend_operation write_operation(std::size_t id,
                                              std::span<const std::byte> buffer) {
     auto result = operation(id, voris::io::backend_operation_kind::write, token);
     result.write_buffer = buffer;
+    return result;
+}
+
+voris::io::backend_operation file_read_operation(std::size_t id,
+                                                 voris::io::backend_handle_token token,
+                                                 std::span<std::byte> buffer,
+                                                 std::uint64_t offset) {
+    auto result = read_operation(id, token, buffer);
+    result.target = voris::io::backend_operation_target::file;
+    result.offset = offset;
+    return result;
+}
+
+voris::io::backend_operation file_write_operation(std::size_t id,
+                                                  voris::io::backend_handle_token token,
+                                                  std::span<const std::byte> buffer,
+                                                  std::uint64_t offset) {
+    auto result = write_operation(id, token, buffer);
+    result.target = voris::io::backend_operation_target::file;
+    result.offset = offset;
+    return result;
+}
+
+voris::io::backend_operation file_fsync_operation(
+    std::size_t id,
+    voris::io::backend_handle_token token) {
+    auto result = operation(id, voris::io::backend_operation_kind::fsync, token);
+    result.target = voris::io::backend_operation_target::file;
     return result;
 }
 
@@ -153,6 +183,9 @@ voris::io::backends::io_uring_capabilities capability_for(
     case voris::io::backend_operation_kind::connect:
         caps.supports_connect = true;
         break;
+    case voris::io::backend_operation_kind::fsync:
+        caps.supports_fsync = true;
+        break;
     case voris::io::backend_operation_kind::close:
     case voris::io::backend_operation_kind::wake:
         break;
@@ -187,14 +220,17 @@ void test_backend_contract_carries_socket_payloads_and_results() {
     const voris::io::backend_handle_token token{1, 1};
 
     const auto read = read_operation(1, token, read_buffer);
+    assert(read.target == voris::io::backend_operation_target::socket);
     assert(read.read_buffer.data() == read_buffer.data());
     assert(read.read_buffer.size() == read_buffer.size());
 
     const auto write = write_operation(2, token, write_buffer);
+    assert(write.target == voris::io::backend_operation_target::socket);
     assert(write.write_buffer.data() == write_buffer.data());
     assert(write.write_buffer.size() == write_buffer.size());
 
     const auto connect = connect_operation(3, token, address);
+    assert(connect.target == voris::io::backend_operation_target::socket);
     assert(connect.socket_address.data() == address.data());
     assert(connect.socket_address.size() == address.size());
 
@@ -203,6 +239,32 @@ void test_backend_contract_carries_socket_payloads_and_results() {
     completion.accepted_native_handle = 9;
     assert(completion.bytes_transferred == 7);
     assert(completion.accepted_native_handle == 9);
+}
+
+void test_backend_contract_carries_file_payloads_offsets_and_fsync() {
+    std::array<std::byte, 5> read_buffer{};
+    const std::array<std::byte, 4> write_buffer{
+        std::byte{'v'}, std::byte{'i'}, std::byte{'o'}, std::byte{'!'}};
+    const voris::io::backend_handle_token token{4, 2};
+
+    const auto read = file_read_operation(4, token, read_buffer, 11);
+    assert(read.kind == voris::io::backend_operation_kind::read);
+    assert(read.target == voris::io::backend_operation_target::file);
+    assert(read.offset == 11);
+    assert(read.read_buffer.data() == read_buffer.data());
+    assert(read.read_buffer.size() == read_buffer.size());
+
+    const auto write = file_write_operation(5, token, write_buffer, 13);
+    assert(write.kind == voris::io::backend_operation_kind::write);
+    assert(write.target == voris::io::backend_operation_target::file);
+    assert(write.offset == 13);
+    assert(write.write_buffer.data() == write_buffer.data());
+    assert(write.write_buffer.size() == write_buffer.size());
+
+    const auto fsync = file_fsync_operation(6, token);
+    assert(fsync.kind == voris::io::backend_operation_kind::fsync);
+    assert(fsync.target == voris::io::backend_operation_target::file);
+    assert(fsync.offset == 0);
 }
 
 #if defined(__linux__)
@@ -267,6 +329,29 @@ unique_fd make_tcp_socket() {
     return unique_fd(duplicate);
 }
 
+unique_fd make_temporary_file() {
+    constexpr char pattern[] = "/tmp/vio_io_uring_backend_test_XXXXXX";
+    std::array<char, sizeof(pattern)> path{};
+    std::ranges::copy(pattern, path.begin());
+
+    const int created = ::mkstemp(path.data());
+    assert(created >= 0);
+    (void)::unlink(path.data());
+
+    const int descriptor_flags = ::fcntl(created, F_GETFD, 0);
+    assert(descriptor_flags != -1);
+    assert(::fcntl(created, F_SETFD, descriptor_flags | FD_CLOEXEC) == 0);
+
+    if (created != 0) {
+        return unique_fd(created);
+    }
+
+    const int duplicate = ::fcntl(created, F_DUPFD_CLOEXEC, 1);
+    assert(duplicate > 0);
+    assert(::close(created) == 0);
+    return unique_fd(duplicate);
+}
+
 unique_fd make_loopback_listener() {
     unique_fd listener = make_tcp_socket();
     int reuse = 1;
@@ -305,6 +390,18 @@ int release_nonzero_fd(unique_fd& fd) {
     assert(duplicate > 0);
     assert(::close(released) == 0);
     return duplicate;
+}
+
+void assert_pwrite_all(int fd, std::span<const std::byte> data, off_t offset) {
+    const auto written = ::pwrite(fd, data.data(), data.size(), offset);
+    assert(written == static_cast<ssize_t>(data.size()));
+}
+
+std::vector<std::byte> read_file_bytes(int fd, std::size_t size, off_t offset) {
+    std::vector<std::byte> output(size);
+    const auto read = ::pread(fd, output.data(), output.size(), offset);
+    assert(read == static_cast<ssize_t>(size));
+    return output;
 }
 
 void wait_for_events(int fd, short events) {
@@ -496,6 +593,158 @@ void test_linux_real_io_uring_read_provider_error_is_reported() {
     const auto completion = wait_for_real_completion(backend);
     assert_provider_code(completion, 931, EBADF);
     assert(backend.shutdown().has_value());
+}
+
+void test_linux_real_io_uring_file_read_uses_offset_and_returns_byte_count() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_read || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto source = make_temporary_file();
+    const std::array<std::byte, 8> contents{
+        std::byte{'0'}, std::byte{'1'}, std::byte{'2'}, std::byte{'3'},
+        std::byte{'4'}, std::byte{'5'}, std::byte{'6'}, std::byte{'7'}};
+    assert_pwrite_all(source.get(), contents, 0);
+
+    const auto token = backend.register_handle(static_cast<std::size_t>(source.get()));
+    assert(token.has_value());
+
+    std::array<std::byte, 3> output{};
+    assert(backend.submit(file_read_operation(981, *token, output, 2)).has_value());
+    const auto completion = wait_for_real_completion(backend);
+    assert(completion.operation_id == 981);
+    assert(completion.result.has_value());
+    assert(completion.bytes_transferred == output.size());
+    assert(output[0] == std::byte{'2'});
+    assert(output[1] == std::byte{'3'});
+    assert(output[2] == std::byte{'4'});
+    assert(backend.shutdown().has_value());
+}
+
+void test_linux_real_io_uring_file_write_uses_offset_and_returns_byte_count() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_write || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto target = make_temporary_file();
+    const std::array<std::byte, 6> seed{
+        std::byte{'_'}, std::byte{'_'}, std::byte{'_'}, std::byte{'_'},
+        std::byte{'_'}, std::byte{'_'}};
+    assert_pwrite_all(target.get(), seed, 0);
+
+    const std::array<std::byte, 3> payload{
+        std::byte{'V'}, std::byte{'I'}, std::byte{'O'}};
+    const auto token = backend.register_handle(static_cast<std::size_t>(target.get()));
+    assert(token.has_value());
+
+    assert(backend.submit(file_write_operation(982, *token, payload, 2)).has_value());
+    const auto completion = wait_for_real_completion(backend);
+    assert(completion.operation_id == 982);
+    assert(completion.result.has_value());
+    assert(completion.bytes_transferred == payload.size());
+
+    const auto output = read_file_bytes(target.get(), seed.size(), 0);
+    assert(output[0] == std::byte{'_'});
+    assert(output[1] == std::byte{'_'});
+    assert(output[2] == std::byte{'V'});
+    assert(output[3] == std::byte{'I'});
+    assert(output[4] == std::byte{'O'});
+    assert(output[5] == std::byte{'_'});
+    assert(backend.shutdown().has_value());
+}
+
+void test_linux_real_io_uring_file_fsync_completes_successfully() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_fsync || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto target = make_temporary_file();
+    const std::array<std::byte, 3> payload{
+        std::byte{'s'}, std::byte{'y'}, std::byte{'n'}};
+    assert_pwrite_all(target.get(), payload, 0);
+
+    const auto token = backend.register_handle(static_cast<std::size_t>(target.get()));
+    assert(token.has_value());
+
+    assert(backend.submit(file_fsync_operation(983, *token)).has_value());
+    const auto completion = wait_for_real_completion(backend);
+    assert(completion.operation_id == 983);
+    assert(completion.result.has_value());
+    assert(completion.bytes_transferred == 0);
+    assert(backend.shutdown().has_value());
+}
+
+void test_linux_real_io_uring_file_provider_error_is_reported() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_read || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto file = make_temporary_file();
+    const int closed_fd = release_nonzero_fd(file);
+    assert(::close(closed_fd) == 0);
+
+    const auto token = backend.register_handle(static_cast<std::size_t>(closed_fd));
+    assert(token.has_value());
+    std::array<std::byte, 1> output{};
+    assert(backend.submit(file_read_operation(984, *token, output, 0)).has_value());
+    const auto completion = wait_for_real_completion(backend);
+    assert_provider_code(completion, 984, EBADF);
+    assert(backend.shutdown().has_value());
+}
+
+void test_linux_real_io_uring_file_close_completes_queued_operation_without_closing_fd() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_read || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto file = make_temporary_file();
+    const auto token = backend.register_handle(static_cast<std::size_t>(file.get()));
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    assert(backend.submit(file_read_operation(985, *token, output, 0)).has_value());
+    assert(backend.close_handle(*token).has_value());
+
+    std::array<voris::io::backend_completion, 1> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_completion_error(completions[0], 985, voris::io::vio_error_code::closed);
+
+    const std::array<std::byte, 1> payload{std::byte{'x'}};
+    assert_pwrite_all(file.get(), payload, 0);
+    assert(backend.shutdown().has_value());
+}
+
+void test_linux_real_io_uring_file_shutdown_closes_queued_operation() {
+    auto caps = voris::io::backends::detect_io_uring_capabilities();
+    if (!caps.available || !caps.supports_fsync || !caps.supports_cancel) {
+        return;
+    }
+
+    voris::io::backends::io_uring_backend backend(caps, real_kernel_options());
+    auto file = make_temporary_file();
+    const auto token = backend.register_handle(static_cast<std::size_t>(file.get()));
+    assert(token.has_value());
+
+    assert(backend.submit(file_fsync_operation(986, *token)).has_value());
+    assert(backend.shutdown().has_value());
+
+    std::array<voris::io::backend_completion, 1> completions{};
+    const auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 1);
+    assert_completion_error(completions[0], 986, voris::io::vio_error_code::closed);
 }
 
 void test_linux_real_io_uring_close_completes_queued_socket_operation() {
@@ -840,6 +1089,14 @@ void test_submit_rejects_missing_operation_opcodes() {
     assert_submit_unsupported_when(
         voris::io::backend_operation_kind::connect,
         &voris::io::backends::io_uring_capabilities::supports_connect);
+
+    auto caps = core_capabilities();
+    caps.supports_fsync = false;
+    voris::io::backends::io_uring_backend backend(caps, deterministic_options());
+    auto token = backend.register_handle(10);
+    assert(token.has_value());
+    assert_void_unsupported(backend.submit(file_fsync_operation(14, *token)));
+    assert(backend.shutdown().has_value());
 }
 
 void test_socket_operation_kinds_accept_only_with_matching_capability() {
@@ -869,6 +1126,9 @@ void test_socket_operation_kinds_accept_only_with_matching_capability() {
             case voris::io::backend_operation_kind::connect:
                 caps.supports_connect = false;
                 break;
+            case voris::io::backend_operation_kind::fsync:
+                caps.supports_fsync = false;
+                break;
             case voris::io::backend_operation_kind::close:
             case voris::io::backend_operation_kind::wake:
                 break;
@@ -896,6 +1156,21 @@ void test_submit_rejects_non_socket_operation_kinds() {
     assert_void_error(backend.submit(operation(41, voris::io::backend_operation_kind::wake,
                                                *token)),
                       voris::io::vio_error_code::invalid_state);
+
+    auto invalid_accept = operation(42, voris::io::backend_operation_kind::accept, *token);
+    invalid_accept.target = voris::io::backend_operation_target::file;
+    assert_void_error(backend.submit(invalid_accept),
+                      voris::io::vio_error_code::invalid_state);
+
+    auto invalid_fsync = operation(43, voris::io::backend_operation_kind::fsync, *token);
+    assert_void_error(backend.submit(invalid_fsync),
+                      voris::io::vio_error_code::invalid_state);
+
+    std::array<std::byte, 1> output{};
+    const std::array<std::byte, 1> input{std::byte{'f'}};
+    assert(backend.submit(file_read_operation(44, *token, output, 0)).has_value());
+    assert(backend.submit(file_write_operation(45, *token, input, 1)).has_value());
+    assert(backend.submit(file_fsync_operation(46, *token)).has_value());
     assert(backend.shutdown().has_value());
 }
 
@@ -1109,6 +1384,7 @@ void test_kernel_submission_requires_cancel_capability_for_close_liveness() {
 
     std::array<std::byte, 1> output{};
     assert_void_unsupported(backend.submit(read_operation(102, *token, output)));
+    assert_void_unsupported(backend.submit(file_read_operation(103, *token, output, 0)));
     assert(backend.shutdown().has_value());
 }
 
@@ -1163,6 +1439,30 @@ void test_kernel_submit_rejects_invalid_payloads_immediately() {
         assert(drained.has_value());
         assert(*drained == 1);
         assert_completion_error(completions[0], 112, voris::io::vio_error_code::closed);
+        assert(backend.shutdown().has_value());
+    }
+
+    {
+        voris::io::backends::io_uring_backend backend(core_capabilities());
+        const auto token = backend.register_handle(1);
+        assert(token.has_value());
+
+        auto invalid = operation(113, voris::io::backend_operation_kind::fsync, *token);
+        assert_void_error(backend.submit(invalid), voris::io::vio_error_code::invalid_state);
+
+        std::array<voris::io::backend_completion, 1> completions{};
+        auto drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 0);
+        assert_empty_kernel_poll(backend);
+
+        assert(backend.submit(file_fsync_operation(113, *token)).has_value());
+        assert(backend.close_handle(*token).has_value());
+
+        drained = backend.drain_completions(completions);
+        assert(drained.has_value());
+        assert(*drained == 1);
+        assert_completion_error(completions[0], 113, voris::io::vio_error_code::closed);
         assert(backend.shutdown().has_value());
     }
 
@@ -1280,6 +1580,40 @@ void test_socket_operations_flow_through_submission_batches_and_close_fifo() {
     drained = backend.drain_completions(completions);
     assert(drained.has_value());
     assert(*drained == 0);
+}
+
+void test_file_operations_flow_through_submission_batches_and_close_fifo() {
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), deterministic_options(8, 2, 8));
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    std::array<std::byte, 2> output{};
+    const std::array<std::byte, 2> input{std::byte{'f'}, std::byte{'s'}};
+    assert(backend.submit(file_read_operation(161, *token, output, 4)).has_value());
+    assert(backend.submit(file_write_operation(162, *token, input, 8)).has_value());
+    assert(backend.submit(file_fsync_operation(163, *token)).has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+
+    std::array<voris::io::backend_completion, 4> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 0);
+
+    assert(backend.close_handle(*token).has_value());
+    polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 3);
+
+    drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 3);
+    assert_drained_closed_completion(completions[0], 161);
+    assert_drained_closed_completion(completions[1], 162);
+    assert_drained_closed_completion(completions[2], 163);
 }
 
 void test_poll_observes_completions_in_batches_and_drain_preserves_order() {
@@ -1423,6 +1757,33 @@ void test_shutdown_closes_queued_and_pending_operations() {
     assert(*drained == 0);
 }
 
+void test_shutdown_closes_queued_and_pending_file_operations() {
+    voris::io::backends::io_uring_backend backend(
+        core_capabilities(), deterministic_options(8, 1, 8));
+    const auto token = backend.register_handle(1);
+    assert(token.has_value());
+
+    std::array<std::byte, 1> output{};
+    const std::array<std::byte, 1> input{std::byte{'q'}};
+    assert(backend.submit(file_read_operation(171, *token, output, 0)).has_value());
+    assert(backend.submit(file_write_operation(172, *token, input, 1)).has_value());
+    assert(backend.submit(file_fsync_operation(173, *token)).has_value());
+
+    auto polled = backend.poll();
+    assert(polled.has_value());
+    assert(*polled == 0);
+
+    assert(backend.shutdown().has_value());
+
+    std::array<voris::io::backend_completion, 4> completions{};
+    auto drained = backend.drain_completions(completions);
+    assert(drained.has_value());
+    assert(*drained == 3);
+    assert_completion_error(completions[0], 171, voris::io::vio_error_code::closed);
+    assert_completion_error(completions[1], 172, voris::io::vio_error_code::closed);
+    assert_completion_error(completions[2], 173, voris::io::vio_error_code::closed);
+}
+
 void test_socket_operations_interact_with_queued_cancellation_and_shutdown() {
     voris::io::backends::io_uring_backend backend(
         core_capabilities(), deterministic_options(8, 1, 8));
@@ -1509,6 +1870,7 @@ int main() {
 
     test_default_eligibility_requires_core_capabilities();
     test_backend_contract_carries_socket_payloads_and_results();
+    test_backend_contract_carries_file_payloads_offsets_and_fsync();
     test_probe_opcode_mapping_is_deterministic();
     test_probe_files_require_read_write_and_fsync();
     test_probe_registered_capabilities_are_independent_candidates();
@@ -1528,9 +1890,11 @@ int main() {
     test_close_requested_operation_requires_cancel_retry_after_unsubmitted_cancel();
     test_poll_flushes_submissions_in_batches();
     test_socket_operations_flow_through_submission_batches_and_close_fifo();
+    test_file_operations_flow_through_submission_batches_and_close_fifo();
     test_poll_observes_completions_in_batches_and_drain_preserves_order();
     test_socket_operation_completions_drain_once_with_completion_batch_limit();
     test_shutdown_closes_queued_and_pending_operations();
+    test_shutdown_closes_queued_and_pending_file_operations();
     test_socket_operations_interact_with_queued_cancellation_and_shutdown();
     test_detected_capabilities_are_conservative();
 #if defined(__linux__)
@@ -1538,6 +1902,12 @@ int main() {
     test_linux_real_io_uring_accept_returns_usable_nonblocking_socket();
     test_linux_real_io_uring_connect_completes();
     test_linux_real_io_uring_read_provider_error_is_reported();
+    test_linux_real_io_uring_file_read_uses_offset_and_returns_byte_count();
+    test_linux_real_io_uring_file_write_uses_offset_and_returns_byte_count();
+    test_linux_real_io_uring_file_fsync_completes_successfully();
+    test_linux_real_io_uring_file_provider_error_is_reported();
+    test_linux_real_io_uring_file_close_completes_queued_operation_without_closing_fd();
+    test_linux_real_io_uring_file_shutdown_closes_queued_operation();
     test_linux_real_io_uring_close_completes_queued_socket_operation();
     test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion();
     test_linux_real_io_uring_shutdown_cancels_submitted_read_without_data();
