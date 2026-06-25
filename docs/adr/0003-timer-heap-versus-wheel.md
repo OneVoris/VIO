@@ -19,6 +19,18 @@ It supports cancellation by looking up live timer ids in an index map and
 eagerly erasing the selected heap entry while repairing the binary-heap
 invariant.
 
+Ready extraction has two forms. The unbudgeted form returns every live timer
+whose deadline is not later than `now`. The budgeted form consumes one timer
+budget unit per distinct ready deadline batch. A consumed unit permits popping
+all live timers with that deadline, so timers sharing the same deadline are not
+split across scheduler iterations. If the timer budget is already exhausted, the
+budgeted form returns no handles and leaves the heap unchanged.
+
+The budgeted form also protects scheduler loops from large forward clock jumps.
+When many distinct deadlines are already ready, the heap returns only as many
+deadline batches as the current loop budget permits and leaves later ready
+deadlines pending for subsequent iterations.
+
 Do not switch to a timer wheel in M3. Timer wheels require bucket sizing,
 wraparound rules, clock-jump rules, and workload-specific tuning that are not
 justified without benchmark evidence.

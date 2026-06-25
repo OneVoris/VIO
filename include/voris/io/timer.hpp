@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <voris/io/loop_budget.hpp>
 #include <voris/io/task.hpp>
 #include <voris/io/virtual_clock.hpp>
 
@@ -47,6 +48,7 @@ public:
     [[nodiscard]] timer_handle add(time_point deadline);
     [[nodiscard]] bool cancel(timer_handle handle) noexcept;
     [[nodiscard]] std::vector<timer_handle> pop_ready(time_point now);
+    [[nodiscard]] std::vector<timer_handle> pop_ready(time_point now, loop_budget_slice& budget);
     [[nodiscard]] std::optional<time_point> next_deadline() const noexcept;
     [[nodiscard]] std::size_t size() const noexcept;
 
@@ -63,6 +65,7 @@ private:
     void sift_down(std::size_t index) noexcept;
     void repair_at(std::size_t index) noexcept;
     void erase_at(std::size_t index) noexcept;
+    void pop_deadline_batch(time_point deadline, std::vector<timer_handle>& ready);
 
     std::size_t owner_id_;
     std::size_t next_id_{1};

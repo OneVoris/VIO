@@ -116,6 +116,14 @@ void timer_heap::erase_at(std::size_t index) noexcept {
     repair_at(index);
 }
 
+void timer_heap::pop_deadline_batch(time_point deadline, std::vector<timer_handle>& ready) {
+    while (!entries_.empty() && entries_.front().deadline == deadline) {
+        const auto id = entries_.front().id;
+        ready.push_back(timer_handle(owner_id_, id));
+        erase_at(0);
+    }
+}
+
 timer_handle timer_heap::add(time_point deadline) {
     const timer_handle handle(owner_id_, next_id_++);
     const auto index = entries_.size();
@@ -148,9 +156,19 @@ std::vector<timer_handle> timer_heap::pop_ready(time_point now) {
     std::vector<timer_handle> ready;
 
     while (!entries_.empty() && entries_.front().deadline <= now) {
-        const auto id = entries_.front().id;
-        ready.push_back(timer_handle(owner_id_, id));
-        erase_at(0);
+        pop_deadline_batch(entries_.front().deadline, ready);
+    }
+    return ready;
+}
+
+std::vector<timer_handle> timer_heap::pop_ready(time_point now, loop_budget_slice& budget) {
+    std::vector<timer_handle> ready;
+
+    while (!entries_.empty() && entries_.front().deadline <= now) {
+        if (!budget.consume_timer()) {
+            break;
+        }
+        pop_deadline_batch(entries_.front().deadline, ready);
     }
     return ready;
 }

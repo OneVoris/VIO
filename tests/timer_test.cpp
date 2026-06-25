@@ -1,4 +1,5 @@
 #include <voris/io/timer.hpp>
+#include <voris/io/loop_budget.hpp>
 
 #include "test_assert.hpp"
 
@@ -23,6 +24,15 @@ namespace {
     return std::ranges::any_of(handles, [expected](timer_handle current) {
         return current.id() == expected.id();
     });
+}
+
+[[nodiscard]] loop_budget_slice make_timer_budget_slice(std::size_t timer_budget) {
+    loop_budget budget;
+    budget.timer_budget = timer_budget;
+
+    auto slice = loop_budget_slice::create(budget);
+    assert(slice.has_value());
+    return std::move(slice).value();
 }
 
 void cancel_earliest_updates_deadline_and_size() {
@@ -153,6 +163,96 @@ void erase_at_sifts_moved_last_entry_up_and_tracks_index() {
     assert(heap.size() == 0);
 }
 
+void budgeted_pop_keeps_same_deadline_batch_together() {
+    timer_heap heap;
+    auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto second = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto third = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto later = heap.add(virtual_monotonic_clock::time_point{20ms});
+
+    auto slice = make_timer_budget_slice(1);
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{100ms}, slice);
+
+    assert(ready.size() == 3);
+    assert(ready[0].id() == first.id());
+    assert(ready[1].id() == second.id());
+    assert(ready[2].id() == third.id());
+    assert(!contains_handle(ready, later));
+    assert(slice.consumed_timers() == 1);
+    assert(slice.remaining_timers() == 0);
+    assert(heap.size() == 1);
+    assert(heap.next_deadline() == virtual_monotonic_clock::time_point{20ms});
+}
+
+void budgeted_pop_limits_distinct_deadline_batches_after_forward_jump() {
+    timer_heap heap;
+    auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
+    auto third = heap.add(virtual_monotonic_clock::time_point{30ms});
+
+    auto slice = make_timer_budget_slice(2);
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{1h}, slice);
+
+    assert(ready.size() == 2);
+    assert(ready[0].id() == first.id());
+    assert(ready[1].id() == second.id());
+    assert(!contains_handle(ready, third));
+    assert(slice.consumed_timers() == 2);
+    assert(slice.remaining_timers() == 0);
+    assert(heap.size() == 1);
+    assert(heap.next_deadline() == virtual_monotonic_clock::time_point{30ms});
+
+    auto next_slice = make_timer_budget_slice(1);
+    ready = heap.pop_ready(virtual_monotonic_clock::time_point{1h}, next_slice);
+
+    assert(ready.size() == 1);
+    assert(ready.front().id() == third.id());
+    assert(next_slice.consumed_timers() == 1);
+    assert(heap.size() == 0);
+    assert(!heap.next_deadline().has_value());
+}
+
+void budgeted_pop_with_zero_remaining_timer_budget_leaves_heap_unchanged() {
+    timer_heap heap;
+    auto first = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
+
+    auto slice = make_timer_budget_slice(1);
+    assert(slice.consume_timer());
+    assert(slice.remaining_timers() == 0);
+
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{1h}, slice);
+
+    assert(ready.empty());
+    assert(slice.consumed_timers() == 1);
+    assert(heap.size() == 2);
+    assert(heap.next_deadline() == virtual_monotonic_clock::time_point{10ms});
+
+    auto unbudgeted_ready = heap.pop_ready(virtual_monotonic_clock::time_point{1h});
+    assert(unbudgeted_ready.size() == 2);
+    assert(unbudgeted_ready[0].id() == first.id());
+    assert(unbudgeted_ready[1].id() == second.id());
+}
+
+void budgeted_pop_skips_cancelled_handles_and_fired_handles_cannot_cancel() {
+    timer_heap heap;
+    auto cancelled = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto fired = heap.add(virtual_monotonic_clock::time_point{10ms});
+    auto later = heap.add(virtual_monotonic_clock::time_point{20ms});
+
+    assert(heap.cancel(cancelled));
+
+    auto slice = make_timer_budget_slice(1);
+    auto ready = heap.pop_ready(virtual_monotonic_clock::time_point{10ms}, slice);
+
+    assert(ready.size() == 1);
+    assert(ready.front().id() == fired.id());
+    assert(!contains_handle(ready, cancelled));
+    assert(!heap.cancel(fired));
+    assert(heap.cancel(later));
+    assert(heap.size() == 0);
+}
+
 void move_construct_transfers_owner_and_resets_source() {
     timer_heap source;
     auto first = source.add(virtual_monotonic_clock::time_point{10ms});
@@ -228,6 +328,10 @@ int main() {
     cancel_rejects_handle_from_another_heap();
     interleaved_add_cancel_pop_keeps_accounting();
     erase_at_sifts_moved_last_entry_up_and_tracks_index();
+    budgeted_pop_keeps_same_deadline_batch_together();
+    budgeted_pop_limits_distinct_deadline_batches_after_forward_jump();
+    budgeted_pop_with_zero_remaining_timer_budget_leaves_heap_unchanged();
+    budgeted_pop_skips_cancelled_handles_and_fired_handles_cannot_cancel();
     move_construct_transfers_owner_and_resets_source();
     move_assign_transfers_owner_and_resets_source();
 
