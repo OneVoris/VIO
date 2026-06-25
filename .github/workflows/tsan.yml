@@ -1,0 +1,72 @@
+name: ThreadSanitizer
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tsan:
+    name: TSan coverage
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CXX: clang++
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Install latest xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Register VXrepo
+        run: |
+          xrepo add-repo vxrepo https://github.com/OneVoris/VXrepo.git
+          xrepo update-repo
+
+      - name: Configure TSan build
+        run: xmake f -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
+
+      - name: Record resolved VMem package
+        run: xrepo info voris-vmem
+
+      - name: Build TSan tests
+        run: xmake
+
+      - name: Run tasks TSan targets
+        run: |
+          xmake run vio_task_test
+          xmake run vio_task_lifetime_test
+          xmake run vio_when_all_test
+          xmake run vio_when_any_test
+
+      - name: Run scopes TSan targets
+        run: xmake run vio_async_scope_test
+
+      - name: Run channels TSan targets
+        run: xmake run vio_channel_test
+
+      - name: Run mailboxes TSan targets
+        run: |
+          xmake run vio_mailbox_test
+          xmake run vio_shard_runtime_integration_test
+
+      - name: Run backends TSan targets
+        run: |
+          xmake run vio_backend_contract_test
+          xmake run vio_backend_differential_test
+          xmake run vio_epoll_backend_test
+          xmake run vio_io_uring_backend_test
+          xmake run vio_kqueue_backend_test
+          xmake run vio_iocp_backend_test

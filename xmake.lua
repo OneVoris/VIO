@@ -30,7 +30,20 @@ option("build_fuzzers")
     set_showmenu(true)
 option_end()
 
+option("sanitize_thread")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable ThreadSanitizer on supported Linux clang/gcc-like toolchains.")
+option_end()
+
 add_requires("voris-vmem")
+
+if has_config("sanitize_thread") then
+    if is_plat("linux") then
+        add_cxflags("-fsanitize=thread", "-fno-omit-frame-pointer", {force = true})
+        add_ldflags("-fsanitize=thread", {force = true})
+    end
+end
 
 target("voris_vio")
     if has_config("build_shared") then

@@ -9,6 +9,47 @@ Required release gates:
   the platform supports them.
 - End-to-end overload and memory ceiling tests.
 
+## ThreadSanitizer Coverage
+
+The `ThreadSanitizer` GitHub Actions workflow registers VXrepo explicitly,
+records `xrepo info voris-vmem`, builds the debug test suite on Linux with
+clang and `--sanitize_thread=y`, then runs the M8 TSan gate by category:
+
+- tasks: `vio_task_test`, `vio_task_lifetime_test`, `vio_when_all_test`,
+  `vio_when_any_test`;
+- scopes: `vio_async_scope_test`;
+- channels: `vio_channel_test`;
+- mailboxes: `vio_mailbox_test`, `vio_shard_runtime_integration_test`;
+- backends: `vio_backend_contract_test`, `vio_backend_differential_test`,
+  `vio_epoll_backend_test`, `vio_io_uring_backend_test`,
+  `vio_kqueue_backend_test`, `vio_iocp_backend_test`.
+
+Local Linux clang evidence uses the same configuration:
+
+```bash
+xmake f -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
+xmake
+xmake run vio_task_test
+xmake run vio_task_lifetime_test
+xmake run vio_when_all_test
+xmake run vio_when_any_test
+xmake run vio_async_scope_test
+xmake run vio_channel_test
+xmake run vio_mailbox_test
+xmake run vio_shard_runtime_integration_test
+xmake run vio_backend_contract_test
+xmake run vio_backend_differential_test
+xmake run vio_epoll_backend_test
+xmake run vio_io_uring_backend_test
+xmake run vio_kqueue_backend_test
+xmake run vio_iocp_backend_test
+```
+
+TSan is a Linux clang gate for this repository and is not combined with
+ASan/UBSan in the same build. Platform-specific backend tests may report an
+unsupported-platform skip on Linux; release evidence still records the target,
+command, exit status, and skip or pass output.
+
 Benchmark records include commit, compiler, standard library, flags, CPU,
 operating system/kernel, workload, throughput, latency percentiles, peak RSS,
 allocations per operation, and timeout/error counts.

@@ -27,6 +27,42 @@
 - Fuzz configuration for parser/format targets.
 - Tier-1 compiler and operating-system matrix.
 
+## ThreadSanitizer
+
+The TSan configuration is enabled explicitly and is intended for Linux clang
+builds. Do not combine it with ASan/UBSan in the same build directory.
+
+```bash
+xmake f -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
+xmake
+```
+
+Run the same coverage set locally that CI runs:
+
+```bash
+xmake run vio_task_test
+xmake run vio_task_lifetime_test
+xmake run vio_when_all_test
+xmake run vio_when_any_test
+xmake run vio_async_scope_test
+xmake run vio_channel_test
+xmake run vio_mailbox_test
+xmake run vio_shard_runtime_integration_test
+xmake run vio_backend_contract_test
+xmake run vio_backend_differential_test
+xmake run vio_epoll_backend_test
+xmake run vio_io_uring_backend_test
+xmake run vio_kqueue_backend_test
+xmake run vio_iocp_backend_test
+```
+
+The CI workflow registers VXrepo before configuring the build, then groups
+those targets as tasks, scopes, channels, mailboxes, and backends. Record the
+compiler, operating system/kernel, VXrepo registration step, `xmake f` line,
+resolved `xrepo info voris-vmem` output, target list, and pass/skip/failure
+result in hardening evidence. Backend targets that are unsupported on the Linux
+runner must still be listed so their skip paths remain visible.
+
 ## Hardening Stress
 
 The default hardening stress gate is included in `xmake test` through the
