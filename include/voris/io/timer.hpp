@@ -39,10 +39,10 @@ public:
     using time_point = virtual_monotonic_clock::time_point;
 
     timer_heap() noexcept;
-    timer_heap(const timer_heap& other);
-    timer_heap& operator=(const timer_heap& other);
-    timer_heap(timer_heap&& other);
-    timer_heap& operator=(timer_heap&& other);
+    timer_heap(const timer_heap& other) = delete;
+    timer_heap& operator=(const timer_heap& other) = delete;
+    timer_heap(timer_heap&& other) noexcept;
+    timer_heap& operator=(timer_heap&& other) noexcept;
 
     [[nodiscard]] timer_handle add(time_point deadline);
     [[nodiscard]] bool cancel(timer_handle handle) noexcept;

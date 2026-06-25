@@ -13,25 +13,7 @@ std::size_t timer_heap::allocate_owner_id() noexcept {
 timer_heap::timer_heap() noexcept
     : owner_id_(allocate_owner_id()) {}
 
-timer_heap::timer_heap(const timer_heap& other)
-    : owner_id_(allocate_owner_id()),
-      next_id_(other.next_id_),
-      entries_(other.entries_),
-      indices_(other.indices_) {}
-
-timer_heap& timer_heap::operator=(const timer_heap& other) {
-    if (this == &other) {
-        return *this;
-    }
-
-    owner_id_ = allocate_owner_id();
-    next_id_ = other.next_id_;
-    entries_ = other.entries_;
-    indices_ = other.indices_;
-    return *this;
-}
-
-timer_heap::timer_heap(timer_heap&& other)
+timer_heap::timer_heap(timer_heap&& other) noexcept
     : owner_id_(std::exchange(other.owner_id_, allocate_owner_id())),
       next_id_(std::exchange(other.next_id_, 1)),
       entries_(std::move(other.entries_)),
@@ -40,7 +22,7 @@ timer_heap::timer_heap(timer_heap&& other)
     other.indices_.clear();
 }
 
-timer_heap& timer_heap::operator=(timer_heap&& other) {
+timer_heap& timer_heap::operator=(timer_heap&& other) noexcept {
     if (this == &other) {
         return *this;
     }

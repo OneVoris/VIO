@@ -4,10 +4,17 @@
 
 #include <algorithm>
 #include <chrono>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace voris::io;
 using namespace std::chrono_literals;
+
+static_assert(!std::is_copy_constructible_v<timer_heap>);
+static_assert(!std::is_copy_assignable_v<timer_heap>);
+static_assert(std::is_nothrow_move_constructible_v<timer_heap>);
+static_assert(std::is_nothrow_move_assignable_v<timer_heap>);
 
 namespace {
 
@@ -146,6 +153,56 @@ void erase_at_sifts_moved_last_entry_up_and_tracks_index() {
     assert(heap.size() == 0);
 }
 
+void move_construct_transfers_owner_and_resets_source() {
+    timer_heap source;
+    auto first = source.add(virtual_monotonic_clock::time_point{10ms});
+    auto second = source.add(virtual_monotonic_clock::time_point{20ms});
+
+    timer_heap moved(std::move(source));
+
+    assert(source.size() == 0);
+    assert(!source.cancel(first));
+    assert(moved.cancel(first));
+    assert(moved.size() == 1);
+
+    auto replacement = source.add(virtual_monotonic_clock::time_point{5ms});
+    assert(!source.cancel(second));
+    assert(source.cancel(replacement));
+    assert(source.size() == 0);
+
+    auto ready = moved.pop_ready(virtual_monotonic_clock::time_point{20ms});
+    assert(ready.size() == 1);
+    assert(ready.front().id() == second.id());
+    assert(moved.size() == 0);
+}
+
+void move_assign_transfers_owner_and_resets_source() {
+    timer_heap source;
+    auto first = source.add(virtual_monotonic_clock::time_point{10ms});
+    auto second = source.add(virtual_monotonic_clock::time_point{20ms});
+
+    timer_heap target;
+    auto old_target = target.add(virtual_monotonic_clock::time_point{1ms});
+
+    target = std::move(source);
+
+    assert(source.size() == 0);
+    assert(!source.cancel(first));
+    assert(!target.cancel(old_target));
+    assert(target.cancel(first));
+    assert(target.size() == 1);
+
+    auto replacement = source.add(virtual_monotonic_clock::time_point{5ms});
+    assert(!source.cancel(second));
+    assert(source.cancel(replacement));
+    assert(source.size() == 0);
+
+    auto ready = target.pop_ready(virtual_monotonic_clock::time_point{20ms});
+    assert(ready.size() == 1);
+    assert(ready.front().id() == second.id());
+    assert(target.size() == 0);
+}
+
 void sleep_uses_virtual_clock() {
     default_scheduler scheduler;
     scheduler_ref ref(scheduler);
@@ -171,6 +228,8 @@ int main() {
     cancel_rejects_handle_from_another_heap();
     interleaved_add_cancel_pop_keeps_accounting();
     erase_at_sifts_moved_last_entry_up_and_tracks_index();
+    move_construct_transfers_owner_and_resets_source();
+    move_assign_transfers_owner_and_resets_source();
 
     timer_heap heap;
     auto second = heap.add(virtual_monotonic_clock::time_point{20ms});
