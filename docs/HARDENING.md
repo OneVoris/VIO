@@ -3,6 +3,8 @@
 Required release gates:
 
 - Long cancellation, close, and shutdown stress tests.
+- Normal Debug/Release CI on Linux and Windows for the non-sanitized test
+  suite.
 - TSan jobs for tasks, scopes, channels, mailboxes, and backends.
 - ASan+UBSan jobs for Debug and Release builds.
 - Backend contract suite for virtual, epoll, io_uring, kqueue, and IOCP where
@@ -17,6 +19,18 @@ candidate. VIO-M7-004 remains open until the full backend contract suite has
 real macOS/BSD and Windows evidence. The global Definition of Done must also
 stay unchecked until complete Debug, Release, ASan+UBSan, and TSan evidence is
 recorded for the release candidate.
+
+## Debug/Release Evidence
+
+The `Debug Release` GitHub Actions workflow is the normal non-sanitized
+evidence path. It runs debug and release builds on `ubuntu-latest` and
+`windows-latest`, registers and updates VXrepo, records
+`xrepo info voris-vmem` before configuration, validates the repository, and
+runs `xmake f -m <mode> --build_tests=y`, `xmake`, and `xmake test`.
+
+The workflow entry does not complete the hardening Definition of Done by
+itself. The DoD remains open until recorded runner pass evidence exists for the
+specific release candidate across Debug, Release, ASan+UBSan, and TSan.
 
 ## End-to-End Overload Gate
 

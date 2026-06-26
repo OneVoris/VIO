@@ -30,6 +30,18 @@ xmake test
 
 The repository never assumes sibling source checkouts. Development overrides must be local, explicit, and uncommitted.
 
+## Debug/Release CI
+
+The `Debug Release` GitHub Actions workflow is the normal repository evidence
+path for non-sanitized debug and release builds. It runs the same configure,
+build, and test sequence on `ubuntu-latest` and `windows-latest`, registers
+VXrepo, refreshes repository metadata, records `xrepo info voris-vmem` before
+configuration, and runs `python tools/check_repository.py`.
+
+This workflow is only an evidence collection entry point. The release
+Definition of Done remains open until recorded runner passes exist for the
+candidate across Debug, Release, ASan+UBSan, and TSan configurations.
+
 ## Options
 
 | Option | Default | Meaning |

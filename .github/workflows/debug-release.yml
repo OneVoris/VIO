@@ -1,0 +1,48 @@
+name: Debug Release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug-release:
+    name: Debug/Release (${{ matrix.os }}, ${{ matrix.mode }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        mode: [debug, release]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install latest xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Register VXrepo
+        run: |
+          xrepo add-repo vxrepo https://github.com/OneVoris/VXrepo.git
+          xrepo update-repo
+
+      - name: Record resolved VMem package
+        run: xrepo info voris-vmem
+
+      - name: Validate repository
+        run: python tools/check_repository.py
+
+      - name: Configure tests
+        run: xmake f -m ${{ matrix.mode }} --build_tests=y
+
+      - name: Build tests
+        run: |
+          xmake
+
+      - name: Run tests
+        run: xmake test

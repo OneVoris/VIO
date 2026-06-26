@@ -33,6 +33,24 @@ macOS/BSD and Windows hosts. The global Definition of Done remains unchecked
 until a release candidate has complete Debug, Release, ASan+UBSan, and TSan
 results.
 
+## Normal Debug/Release CI
+
+The `Debug Release` GitHub Actions workflow runs the ordinary non-sanitized
+test suite for debug and release modes on `ubuntu-latest` and
+`windows-latest`. Each matrix entry installs latest xmake, registers VXrepo,
+refreshes repository metadata, records `xrepo info voris-vmem` before
+configuration, validates the repository, then runs:
+
+```bash
+xmake f -m <debug-or-release> --build_tests=y
+xmake
+xmake test
+```
+
+The workflow creates a repeatable evidence path. It does not close the global
+Definition of Done until the release candidate has recorded runner pass
+evidence for Debug, Release, ASan+UBSan, and TSan.
+
 ## Platform Backend Contract CI
 
 The `Platform Backend Contract` GitHub Actions workflow runs the debug backend
