@@ -60,7 +60,7 @@ int main() {
         for (int index = 0; index < total; ++index) {
             for (;;) {
                 auto id = std::make_unique<int>(index);
-                auto result = threaded.submit([&seen, &executed, id = std::move(id)] {
+                auto result = threaded.submit([&seen, &executed, total, id = std::move(id)] {
                     assert(*id >= 0);
                     assert(*id < total);
                     ++seen[static_cast<std::size_t>(*id)];
