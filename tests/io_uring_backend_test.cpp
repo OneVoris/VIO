@@ -580,6 +580,14 @@ void assert_provider_code(const voris::io::backend_completion& completion,
     assert(*completion.result.error().provider_code == expected_provider_code);
 }
 
+bool real_io_uring_provider_tests_enabled() noexcept {
+    const char* requested = std::getenv("VIO_RUN_REAL_IO_URING_TESTS");
+    if (requested != nullptr) {
+        return requested[0] == '1' && requested[1] == '\0';
+    }
+    return std::getenv("GITHUB_ACTIONS") == nullptr && std::getenv("CI") == nullptr;
+}
+
 voris::io::backend_completion wait_for_real_completion(voris::io::backend& backend) {
     using namespace std::chrono_literals;
 
@@ -2831,24 +2839,26 @@ int main() {
     test_socket_operations_interact_with_queued_cancellation_and_shutdown();
     test_detected_capabilities_are_conservative();
 #if defined(__linux__)
-    test_linux_real_io_uring_read_write_transfer_returns_byte_counts();
-    test_linux_real_io_uring_accept_returns_usable_nonblocking_socket();
-    test_linux_real_io_uring_connect_completes();
-    test_linux_real_io_uring_read_provider_error_is_reported();
-    test_linux_real_io_uring_file_read_uses_offset_and_returns_byte_count();
-    test_linux_real_io_uring_file_write_uses_offset_and_returns_byte_count();
-    test_linux_real_io_uring_file_fsync_completes_successfully();
-    test_linux_real_io_uring_file_provider_error_is_reported();
-    test_linux_real_io_uring_file_close_completes_queued_operation_without_closing_fd();
-    test_linux_real_io_uring_file_write_submitted_before_close_reports_kernel_result();
-    test_linux_real_io_uring_file_shutdown_closes_queued_operation();
-    test_linux_real_io_uring_close_completes_queued_socket_operation();
-    test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion();
-    test_linux_real_io_uring_shutdown_cancels_submitted_read_without_data();
-    test_linux_real_io_uring_async_cancel_of_submitted_read_completes_once();
-    test_linux_real_io_uring_submit_requires_cancel_for_kernel_liveness();
-    test_linux_real_io_uring_registered_buffers_lifecycle_when_supported();
-    test_linux_real_io_uring_registered_files_lifecycle_when_supported();
+    if (real_io_uring_provider_tests_enabled()) {
+        test_linux_real_io_uring_read_write_transfer_returns_byte_counts();
+        test_linux_real_io_uring_accept_returns_usable_nonblocking_socket();
+        test_linux_real_io_uring_connect_completes();
+        test_linux_real_io_uring_read_provider_error_is_reported();
+        test_linux_real_io_uring_file_read_uses_offset_and_returns_byte_count();
+        test_linux_real_io_uring_file_write_uses_offset_and_returns_byte_count();
+        test_linux_real_io_uring_file_fsync_completes_successfully();
+        test_linux_real_io_uring_file_provider_error_is_reported();
+        test_linux_real_io_uring_file_close_completes_queued_operation_without_closing_fd();
+        test_linux_real_io_uring_file_write_submitted_before_close_reports_kernel_result();
+        test_linux_real_io_uring_file_shutdown_closes_queued_operation();
+        test_linux_real_io_uring_close_completes_queued_socket_operation();
+        test_linux_real_io_uring_close_waits_for_submitted_cqe_before_completion();
+        test_linux_real_io_uring_shutdown_cancels_submitted_read_without_data();
+        test_linux_real_io_uring_async_cancel_of_submitted_read_completes_once();
+        test_linux_real_io_uring_submit_requires_cancel_for_kernel_liveness();
+        test_linux_real_io_uring_registered_buffers_lifecycle_when_supported();
+        test_linux_real_io_uring_registered_files_lifecycle_when_supported();
+    }
 #endif
 
     auto caps = backends::io_uring_capabilities{

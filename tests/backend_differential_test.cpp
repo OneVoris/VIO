@@ -12,6 +12,7 @@
 #include "test_assert.hpp"
 
 #if defined(__linux__)
+#include <cstdlib>
 #include <fcntl.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -890,7 +891,19 @@ normalized_completion run_real_io_uring_write_success(
     return normalize(completion);
 }
 
+bool real_io_uring_provider_tests_enabled() noexcept {
+    const char* requested = std::getenv("VIO_RUN_REAL_IO_URING_TESTS");
+    if (requested != nullptr) {
+        return requested[0] == '1' && requested[1] == '\0';
+    }
+    return std::getenv("GITHUB_ACTIONS") == nullptr && std::getenv("CI") == nullptr;
+}
+
 void test_real_linux_read_write_shared_success_when_available() {
+    if (!real_io_uring_provider_tests_enabled()) {
+        return;
+    }
+
     auto capabilities = voris::io::backends::detect_io_uring_capabilities();
     if (!capabilities.available || !capabilities.supports_read ||
         !capabilities.supports_write || !capabilities.supports_cancel) {

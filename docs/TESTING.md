@@ -104,6 +104,12 @@ target list, and pass/skip/failure result in hardening evidence. Backend
 targets that are unsupported on the Linux runner must still be listed so their
 skip paths remain visible.
 
+Hosted CI runs the deterministic io_uring backend coverage but does not treat
+the hosted runner as real-provider release evidence. Linux real io_uring
+provider tests are skipped on CI unless `VIO_RUN_REAL_IO_URING_TESTS=1` is set.
+Release evidence or dedicated Linux runner validation must set that variable,
+record the kernel/provider details, and archive the pass/skip/failure result.
+
 ## ASan+UBSan
 
 AddressSanitizer and UndefinedBehaviorSanitizer are enabled together through
