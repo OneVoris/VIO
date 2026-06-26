@@ -39,34 +39,34 @@ jobs:
         run: xrepo info voris-vmem
 
       - name: Configure TSan build
-        run: xmake f -y -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
+        run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
 
       - name: Build TSan tests
-        run: xmake
+        run: python .github/scripts/run_xmake_step.py -- xmake -vD
 
       - name: Run tasks TSan targets
         run: |
-          xmake run vio_task_test
-          xmake run vio_task_lifetime_test
-          xmake run vio_when_all_test
-          xmake run vio_when_any_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_task_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_task_lifetime_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_when_all_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_when_any_test
 
       - name: Run scopes TSan targets
-        run: xmake run vio_async_scope_test
+        run: python .github/scripts/run_xmake_step.py -- xmake run vio_async_scope_test
 
       - name: Run channels TSan targets
-        run: xmake run vio_channel_test
+        run: python .github/scripts/run_xmake_step.py -- xmake run vio_channel_test
 
       - name: Run mailboxes TSan targets
         run: |
-          xmake run vio_mailbox_test
-          xmake run vio_shard_runtime_integration_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_mailbox_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_shard_runtime_integration_test
 
       - name: Run backends TSan targets
         run: |
-          xmake run vio_backend_contract_test
-          xmake run vio_backend_differential_test
-          xmake run vio_epoll_backend_test
-          xmake run vio_io_uring_backend_test
-          xmake run vio_kqueue_backend_test
-          xmake run vio_iocp_backend_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_backend_contract_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_backend_differential_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_epoll_backend_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_io_uring_backend_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_kqueue_backend_test
+          python .github/scripts/run_xmake_step.py -- xmake run vio_iocp_backend_test

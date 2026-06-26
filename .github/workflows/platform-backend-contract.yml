@@ -49,23 +49,22 @@ jobs:
         run: python tools/check_repository.py
 
       - name: Configure debug tests
-        run: xmake f -y -m debug --build_tests=y
+        run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m debug --build_tests=y
 
       - name: Build debug tests
-        run: |
-          xmake
+        run: python .github/scripts/run_xmake_step.py -- xmake -vD
 
       - name: Build backend contract target
-        run: xmake build vio_backend_contract_test
+        run: python .github/scripts/run_xmake_step.py -- xmake build -vD vio_backend_contract_test
 
       - name: Run backend contract suite
-        run: xmake run vio_backend_contract_test
+        run: python .github/scripts/run_xmake_step.py -- xmake run vio_backend_contract_test
 
       - name: Run kqueue backend target
-        run: xmake run vio_kqueue_backend_test
+        run: python .github/scripts/run_xmake_step.py -- xmake run vio_kqueue_backend_test
 
       - name: Run IOCP backend target
-        run: xmake run vio_iocp_backend_test
+        run: python .github/scripts/run_xmake_step.py -- xmake run vio_iocp_backend_test
 
       - name: Run all registered tests
-        run: xmake test
+        run: python .github/scripts/run_xmake_step.py -- xmake test

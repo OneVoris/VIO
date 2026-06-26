@@ -38,11 +38,10 @@ jobs:
         run: python tools/check_repository.py
 
       - name: Configure tests
-        run: xmake f -y -m ${{ matrix.mode }} --build_tests=y
+        run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m ${{ matrix.mode }} --build_tests=y
 
       - name: Build tests
-        run: |
-          xmake
+        run: python .github/scripts/run_xmake_step.py -- xmake -vD
 
       - name: Run tests
-        run: xmake test
+        run: python .github/scripts/run_xmake_step.py -- xmake test
