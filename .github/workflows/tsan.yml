@@ -61,7 +61,7 @@ jobs:
         run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m debug --build_tests=y --sanitize_thread=y --cc="$CC" --cxx="$CXX"
 
       - name: Build TSan tests
-        run: python .github/scripts/run_xmake_step.py -- xmake -vD
+        run: python .github/scripts/run_xmake_step.py -- xmake -vD -j1
 
       - name: Run tasks TSan targets
         run: |

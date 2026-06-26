@@ -41,7 +41,12 @@ jobs:
         run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m ${{ matrix.mode }} --build_tests=y
 
       - name: Build tests
+        if: runner.os != 'Linux'
         run: python .github/scripts/run_xmake_step.py -- xmake -vD
+
+      - name: Build tests (Linux serial diagnostics)
+        if: runner.os == 'Linux'
+        run: python .github/scripts/run_xmake_step.py -- xmake -vD -j1
 
       - name: Run tests
         run: python .github/scripts/run_xmake_step.py -- xmake test

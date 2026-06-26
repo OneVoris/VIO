@@ -66,7 +66,7 @@ jobs:
         run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m ${{ matrix.mode }} --build_tests=y --sanitize_address_undefined=y --cc="$CC" --cxx="$CXX"
 
       - name: Build ASan+UBSan tests
-        run: python .github/scripts/run_xmake_step.py -- xmake -vD
+        run: python .github/scripts/run_xmake_step.py -- xmake -vD -j1
 
       - name: Run ASan+UBSan tests
         run: python .github/scripts/run_xmake_step.py -- xmake test
