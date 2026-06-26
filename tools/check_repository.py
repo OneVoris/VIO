@@ -10,19 +10,25 @@ CJK = re.compile(r'[\u3400-\u9fff]')
 LINK = re.compile(r'\[[^\]]+\]\(([^)]+)\)')
 TASK = re.compile(r'\*\*([A-Z]+-M\d+-\d{3})\*\*')
 
-REQUIRED = [
+PUBLIC_REQUIRED = [
     'README.md', 'ARCHITECTURE.md', 'ROADMAP.md', 'TODO.md',
     'CONTRIBUTING.md', 'SECURITY.md', 'CHANGELOG.md', '.gitignore',
-    'AGENTS.md', 'xmake.lua', 'voris-package.toml',
+    'xmake.lua', 'voris-package.toml',
     'docs/API.md', 'docs/BUILDING.md', 'docs/DEPENDENCIES.md',
     'docs/TESTING.md', 'docs/REPOSITORY_ISOLATION.md',
-    'docs/RELEASES.md', 'docs/LICENSING.md', 'docs/REFERENCES.md',
-    '.agent/README.md', '.agent/UPSTREAM_SYNC.md',
-    '.agent/UPSTREAM_REQUEST_TEMPLATE.md', '.agent/TASK_REPORT_TEMPLATE.md'
+    'docs/RELEASES.md', 'docs/LICENSING.md', 'docs/REFERENCES.md'
+]
+
+AGENT_MARKDOWN = [
+    'AGENTS.md',
+    '.agent/README.md',
+    '.agent/UPSTREAM_SYNC.md',
+    '.agent/UPSTREAM_REQUEST_TEMPLATE.md',
+    '.agent/TASK_REPORT_TEMPLATE.md',
 ]
 
 errors: list[str] = []
-for rel in REQUIRED:
+for rel in PUBLIC_REQUIRED:
     if not (ROOT / rel).exists():
         errors.append(f'missing required file: {rel}')
 
@@ -37,9 +43,16 @@ for path in public_markdown:
     if CJK.search(text):
         errors.append(f'public Markdown contains CJK text: {path.relative_to(ROOT)}')
 
-agent_markdown = [ROOT / 'AGENTS.md', *list((ROOT / '.agent').rglob('*.md'))]
+agent_markdown = [ROOT / rel for rel in AGENT_MARKDOWN if (ROOT / rel).exists()]
+agent_dir = ROOT / '.agent'
+if agent_dir.exists():
+    known_agent_markdown = {path.resolve() for path in agent_markdown}
+    for path in agent_dir.rglob('*.md'):
+        if path.resolve() not in known_agent_markdown:
+            agent_markdown.append(path)
+
 for path in agent_markdown:
-    if path.exists() and not CJK.search(path.read_text(encoding='utf-8')):
+    if not CJK.search(path.read_text(encoding='utf-8')):
         errors.append(f'Agent Markdown is expected to contain Chinese text: {path.relative_to(ROOT)}')
 
 ids = TASK.findall((ROOT / 'TODO.md').read_text(encoding='utf-8'))
