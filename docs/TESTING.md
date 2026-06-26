@@ -27,6 +27,12 @@
 - Fuzz configuration for parser/format targets.
 - Tier-1 compiler and operating-system matrix.
 
+Required configurations are release gates, not permanent evidence. VIO-M7-004
+remains open until the full backend contract suite is recorded on real
+macOS/BSD and Windows hosts. The global Definition of Done remains unchecked
+until a release candidate has complete Debug, Release, ASan+UBSan, and TSan
+results.
+
 ## ThreadSanitizer
 
 The TSan configuration is enabled explicitly and is intended for Linux clang

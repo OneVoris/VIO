@@ -15,6 +15,24 @@ VIO uses semantic versions. During `0.x`, minor versions may contain source-inco
 7. Verify a clean VXrepo install in Debug/Release and supported feature combinations.
 8. Notify downstream repositories only after the VXrepo recipe is available.
 
+## Release Evidence Checklist
+
+Release notes must record the exact dependency and backend evidence used for
+the tag:
+
+- VXrepo registration state and the actual `xrepo info voris-vmem` output,
+  including resolved version, repository, and source URL when available.
+- Confirmation that the repository still uses the no-version selector
+  `add_requires("voris-vmem")`; release preparation must not pin VMem in
+  `xmake.lua`.
+- Debug, Release, ASan+UBSan, and TSan command lines and results for the
+  release candidate.
+- Backend contract results for virtual and every operating-system backend on
+  hosts that support them, plus explicit pass/skip/fail records for unsupported
+  provider paths.
+- io_uring default-enable gate evidence before any release changes the Linux
+  default away from epoll.
+
 ## Upstream/Downstream Order
 
 An upstream release must be available through VXrepo before a downstream release can depend on it. Downstream repositories must not release against an unreleased upstream commit.

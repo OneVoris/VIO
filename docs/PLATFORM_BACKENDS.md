@@ -36,3 +36,16 @@ not expose identical cancellation and file-I/O semantics.
 
 Cancellation is always a request. Backends that cannot stop an already-started
 file operation must report the real completion result.
+
+## Evidence Status
+
+`docs/BACKEND_CAPABILITIES.md` is the release-facing matrix for backend
+capabilities, limits, and failure modes. Platform backend entries in this file
+describe implementation contracts, not a claim that every release gate has
+already passed.
+
+VIO-M7-004 remains open until the complete backend contract suite is recorded
+on real macOS/BSD and Windows hosts. Unsupported-platform behavior still has to
+stay visible in Linux-centered validation: non-kqueue platforms return
+`unsupported` for kqueue operations, and non-Windows platforms return
+`unsupported` for IOCP operations.

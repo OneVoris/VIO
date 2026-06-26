@@ -9,6 +9,12 @@ Required release gates:
   the platform supports them.
 - End-to-end overload and memory ceiling tests.
 
+These gates are requirements, not standing proof for a future release
+candidate. VIO-M7-004 remains open until the full backend contract suite has
+real macOS/BSD and Windows evidence. The global Definition of Done must also
+stay unchecked until complete Debug, Release, ASan+UBSan, and TSan evidence is
+recorded for the release candidate.
+
 ## End-to-End Overload Gate
 
 `vio_e2e_overload_test` is the `VIO-M8-004` gate for scheduler lag, overload
