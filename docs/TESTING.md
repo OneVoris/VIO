@@ -33,6 +33,19 @@ macOS/BSD and Windows hosts. The global Definition of Done remains unchecked
 until a release candidate has complete Debug, Release, ASan+UBSan, and TSan
 results.
 
+## Platform Backend Contract CI
+
+The `Platform Backend Contract` GitHub Actions workflow runs the debug backend
+contract gate on `macos-latest` and `windows-latest`. The matrix names the
+macOS kqueue path and the Windows IOCP path, records `xrepo info voris-vmem`,
+builds `vio_backend_contract_test`, runs the backend contract suite, runs both
+the kqueue and IOCP backend targets so unsupported paths stay visible, and
+finishes with `xmake test`.
+
+This workflow is an evidence collection entry point. `VIO-M7-004` and the
+backend-contract Definition of Done stay open until recorded macOS and Windows
+passes from real runners are attached to the task evidence.
+
 ## ThreadSanitizer
 
 The TSan configuration is enabled explicitly and is intended for Linux clang

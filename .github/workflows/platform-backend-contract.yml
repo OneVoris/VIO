@@ -1,0 +1,71 @@
+name: Platform Backend Contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-contract:
+    name: ${{ matrix.contract_path }} backend contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            contract_path: kqueue
+            primary_target: vio_kqueue_backend_test
+          - os: windows-latest
+            contract_path: IOCP
+            primary_target: vio_iocp_backend_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install latest xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Register VXrepo
+        run: |
+          xrepo add-repo vxrepo https://github.com/OneVoris/VXrepo.git
+          xrepo update-repo
+
+      - name: Record platform contract path
+        run: |
+          echo "runner=${{ matrix.os }}"
+          echo "contract_path=${{ matrix.contract_path }}"
+          echo "primary_target=${{ matrix.primary_target }}"
+
+      - name: Validate repository
+        run: python tools/check_repository.py
+
+      - name: Configure debug tests
+        run: xmake f -m debug --build_tests=y
+
+      - name: Record resolved VMem package
+        run: xrepo info voris-vmem
+
+      - name: Build debug tests
+        run: |
+          xmake
+
+      - name: Build backend contract target
+        run: xmake build vio_backend_contract_test
+
+      - name: Run backend contract suite
+        run: xmake run vio_backend_contract_test
+
+      - name: Run kqueue backend target
+        run: xmake run vio_kqueue_backend_test
+
+      - name: Run IOCP backend target
+        run: xmake run vio_iocp_backend_test
+
+      - name: Run all registered tests
+        run: xmake test

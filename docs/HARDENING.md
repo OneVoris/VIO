@@ -7,6 +7,9 @@ Required release gates:
 - ASan+UBSan jobs for Debug and Release builds.
 - Backend contract suite for virtual, epoll, io_uring, kqueue, and IOCP where
   the platform supports them.
+- Platform backend contract CI on macOS and Windows, with the kqueue and IOCP
+  contract paths named in the runner matrix and unsupported-path targets still
+  executed for visibility.
 - End-to-end overload and memory ceiling tests.
 
 These gates are requirements, not standing proof for a future release
