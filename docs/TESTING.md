@@ -27,11 +27,12 @@
 - Fuzz configuration for parser/format targets.
 - Tier-1 compiler and operating-system matrix.
 
-Required configurations are release gates, not permanent evidence. VIO-M7-004
-remains open until the full backend contract suite is recorded on real
-macOS/BSD and Windows hosts. The global Definition of Done remains unchecked
-until a release candidate has complete Debug, Release, ASan+UBSan, and TSan
-results.
+Required configurations are release gates, not permanent evidence. Evidence
+commit `ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` records completed release
+gates through the `Platform Backend Contract` run `28219130856`, `Debug
+Release` run `28219130885`, `ASan UBSan` run `28219130878`, and
+`ThreadSanitizer` run `28219130861`. Future release candidates must record
+fresh runner pass evidence before reusing the same Definition of Done status.
 
 ## Normal Debug/Release CI
 
@@ -47,9 +48,11 @@ xmake
 xmake test
 ```
 
-The workflow creates a repeatable evidence path. It does not close the global
-Definition of Done until the release candidate has recorded runner pass
-evidence for Debug, Release, ASan+UBSan, and TSan.
+The workflow creates a repeatable evidence path. Evidence commit
+`ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` recorded `Debug Release` run
+`28219130885`; future candidates must attach their own runner pass evidence for
+Debug, Release, ASan+UBSan, and TSan before claiming the global Definition of
+Done.
 
 ## Platform Backend Contract CI
 
@@ -60,9 +63,11 @@ builds `vio_backend_contract_test`, runs the backend contract suite, runs both
 the kqueue and IOCP backend targets so unsupported paths stay visible, and
 finishes with `xmake test`.
 
-This workflow is an evidence collection entry point. `VIO-M7-004` and the
-backend-contract Definition of Done stay open until recorded macOS and Windows
-passes from real runners are attached to the task evidence.
+This workflow is an evidence collection entry point. Evidence commit
+`ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` recorded `Platform Backend Contract`
+run `28219130856` with macOS kqueue and Windows IOCP runner passes, closing
+`VIO-M7-004` for that candidate. Future candidates must attach fresh macOS and
+Windows passes before reusing that backend-contract Definition of Done status.
 
 ## ThreadSanitizer
 
@@ -139,9 +144,10 @@ The `ASan UBSan` GitHub Actions workflow runs those debug and release entries on
 `ubuntu-latest`, installs the latest xmake action, uses the runner GCC C++
 toolchain, verifies `std::expected`/`std::unexpected`, registers VXrepo, records
 `xrepo info voris-vmem`, builds, and runs `xmake test`. The workflow is a
-release-evidence collection entry point only. The global Definition of Done
-stays unchecked until complete Debug, Release, ASan+UBSan, and TSan evidence is
-recorded for the release candidate.
+release-evidence collection entry point only. Evidence commit
+`ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` recorded `ASan UBSan` run
+`28219130878`; future release candidates must record complete Debug, Release,
+ASan+UBSan, and TSan evidence before claiming the global Definition of Done.
 
 ## Hardening Stress
 

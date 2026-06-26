@@ -44,8 +44,9 @@ capabilities, limits, and failure modes. Platform backend entries in this file
 describe implementation contracts, not a claim that every release gate has
 already passed.
 
-VIO-M7-004 remains open until the complete backend contract suite is recorded
-on real macOS/BSD and Windows hosts. Unsupported-platform behavior still has to
-stay visible in Linux-centered validation: non-kqueue platforms return
+Evidence commit `ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` records
+`VIO-M7-004` through `Platform Backend Contract` run `28219130856` on real
+macOS and Windows hosts. Unsupported-platform behavior still has to stay
+visible in Linux-centered validation: non-kqueue platforms return
 `unsupported` for kqueue operations, and non-Windows platforms return
 `unsupported` for IOCP operations.

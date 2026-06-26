@@ -88,7 +88,7 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 - [x] **VIO-M7-001** Implement the kqueue backend and wake-up mechanism.
 - [x] **VIO-M7-002** Implement IOCP handle association and batched completion retrieval.
 - [x] **VIO-M7-003** Define `OVERLAPPED` operation lifetime and cancellation behavior.
-- [ ] **VIO-M7-004** Run the complete backend contract suite on macOS and Windows.
+- [x] **VIO-M7-004** Run the complete backend contract suite on macOS and Windows.
 - [x] **VIO-M7-005** Document cancellation and file-I/O semantics that cannot be made identical across platforms.
 
 ## M8 — Hardening, Benchmarks, and Release
@@ -102,10 +102,10 @@ Task identifiers follow `VIO-M<milestone>-<sequence>`. A task is complete only w
 
 ## Definition of Done
 
-- [ ] Exactly-once completion and continuation-scheduler semantics are demonstrated by tests.
-- [ ] No blocking call runs on a shard; explicit executor exceptions are documented and tested.
-- [ ] Every wait queue is bounded or has a strict owner-derived maximum.
-- [ ] Virtual and operating-system backends satisfy the same contract.
-- [ ] Debug, Release, ASan+UBSan, and TSan configurations pass.
-- [ ] Shutdown leaves no pending operation, thread, or timer.
-- [ ] Hot-path changes include latency, throughput, allocation, and queue-depth benchmarks.
+- [x] Exactly-once completion and continuation-scheduler semantics are demonstrated by tests.
+- [x] No blocking call runs on a shard; explicit executor exceptions are documented and tested.
+- [x] Every wait queue is bounded or has a strict owner-derived maximum.
+- [x] Virtual and operating-system backends satisfy the same contract.
+- [x] Debug, Release, ASan+UBSan, and TSan configurations pass.
+- [x] Shutdown leaves no pending operation, thread, or timer.
+- [x] Hot-path changes include latency, throughput, allocation, and queue-depth benchmarks.

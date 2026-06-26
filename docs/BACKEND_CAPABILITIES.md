@@ -12,8 +12,8 @@ strings, and other diagnostic text is not an API.
 | `virtual` | All | Never a production default | Deterministic contract backend for tests, synthetic completions, close/shutdown race checks, and stale-generation behavior. | Must pass the shared backend contract suite in every release validation. It does not prove real provider behavior. |
 | `epoll` | Linux | Linux default unless io_uring release gates all pass | Readiness backend for sockets, `eventfd` wake-up, generation-aware file-descriptor registry, and readiness-to-operation completion mapping. | Linux provider evidence is required for release. It remains the conservative Linux default while io_uring default-enable gates are incomplete. |
 | `io_uring` | Linux with io_uring support | Optional; selected only when capability and evidence gates pass | Completion backend for socket read, socket write, accept, connect, file read, file write, and fsync. Registered buffers and files are optional optimizations. | M6 tests cover capability detection, deterministic kernel behavior, differential checks, and real Linux paths when available. It is not the default unless all default-enable gates are recorded. |
-| `kqueue` | macOS and BSD systems with kqueue | Platform backend on kqueue platforms | Readiness backend for sockets, `EVFILT_USER` wake-up, generation-aware descriptor cookies, and stale-event filtering. | M7 implementation tests exist. M7-004 macOS/BSD release contract evidence is still a known gap. On non-kqueue platforms operations return `unsupported`. |
-| `IOCP` | Windows | Platform backend on Windows | Completion-port skeleton with IOCP port ownership, handle association, bounded completion keys/batches, heap-stable internal `OVERLAPPED` storage, native packet mapping/cleanup, and deterministic synthetic/test completion paths. | M7 implementation tests exist. M7-003 has not yet wired real `ReadFile`/`WriteFile` submission, and this row must not be read as a fully wired real socket or file provider. See `docs/PLATFORM_BACKENDS.md` for current native-submission limits. M7-004 Windows release contract evidence is still a known gap. |
+| `kqueue` | macOS and BSD systems with kqueue | Platform backend on kqueue platforms | Readiness backend for sockets, `EVFILT_USER` wake-up, generation-aware descriptor cookies, and stale-event filtering. | M7 implementation tests exist. Evidence commit `ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` records M7-004 macOS contract evidence through `Platform Backend Contract` run `28219130856`. On non-kqueue platforms operations return `unsupported`. |
+| `IOCP` | Windows | Platform backend on Windows | Completion-port skeleton with IOCP port ownership, handle association, bounded completion keys/batches, heap-stable internal `OVERLAPPED` storage, native packet mapping/cleanup, and deterministic synthetic/test completion paths. | M7 implementation tests exist. M7-003 has not yet wired real `ReadFile`/`WriteFile` submission, and this row must not be read as a fully wired real socket or file provider. See `docs/PLATFORM_BACKENDS.md` for current native-submission limits. Evidence commit `ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` records M7-004 Windows contract evidence through `Platform Backend Contract` run `28219130856`. |
 | `file/blocking-executor` | All platforms supported by `std::filesystem` and native file streams | Portable file path until a platform file provider is explicitly used | File open, close, file read, file write, size, truncate, allocation hint, `sync_data`, `sync_all`, and sendfile-compatible borrowed views through an explicit bounded `blocking_executor`. | M5 file tests cover queue saturation, short progress, close, and disk errors. It is not an event backend and does not register handles, poll, or wake. |
 
 The repository may provide default scheduler types, but VIO does not install a
@@ -127,14 +127,15 @@ kqueue behavior is platform-limited. On non-kqueue platforms the backend keeps
 returning `unsupported` for register, submit, cancel, close, poll, drain, wake,
 and shutdown instead of silently emulating kqueue semantics.
 
-## Known Evidence Gaps
+## Evidence Status and Remaining Gaps
 
-- VIO-M7-004 is not complete: the full backend contract suite still needs real
-  macOS/BSD and Windows evidence for kqueue and IOCP before the global backend
-  contract DoD can be checked.
-- Global release DoD still requires complete Debug, Release, ASan+UBSan, and
-  TSan evidence for the release candidate. Existing jobs and documentation are
-  gates, not proof that every configuration has passed for a future tag.
+- Evidence commit `ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` records M7-004
+  backend contract evidence via `Platform Backend Contract` run `28219130856`
+  and global Debug/Release, ASan+UBSan, and TSan evidence via runs
+  `28219130885`, `28219130878`, and `28219130861`.
+- Existing jobs and documentation are gates, not proof that every configuration
+  has passed for a future tag. Each future release candidate must record fresh
+  runner pass evidence before reusing completed DoD status.
 - The repository records the resolved `voris-vmem` version from
   `xrepo info voris-vmem` as release evidence. The repository does not pin a
   VMem version selector in `xmake.lua`.
@@ -158,5 +159,5 @@ Before claiming a backend-ready release:
 4. Record pass/skip/fail output for unsupported-provider paths. A skip is
    acceptable only when the backend is unsupported on the host and the skip path
    itself is tested.
-5. Keep VIO-M7-004 and global DoD items unchecked until the exact release
-   evidence proves them.
+5. Check VIO-M7-004 and global DoD items only when the exact release evidence
+   proves them; otherwise keep them unchecked.

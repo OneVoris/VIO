@@ -15,10 +15,11 @@ Required release gates:
 - End-to-end overload and memory ceiling tests.
 
 These gates are requirements, not standing proof for a future release
-candidate. VIO-M7-004 remains open until the full backend contract suite has
-real macOS/BSD and Windows evidence. The global Definition of Done must also
-stay unchecked until complete Debug, Release, ASan+UBSan, and TSan evidence is
-recorded for the release candidate.
+candidate. Evidence commit `ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` records
+the completed platform contract, Debug/Release, ASan+UBSan, and TSan gates via
+GitHub Actions runs `28219130856`, `28219130885`, `28219130878`, and
+`28219130861`. Future release candidates must record fresh evidence before
+reusing the same hardening Definition of Done status.
 
 ## Debug/Release Evidence
 
@@ -29,8 +30,9 @@ evidence path. It runs debug and release builds on `ubuntu-latest` and
 runs `xmake f -m <mode> --build_tests=y`, `xmake`, and `xmake test`.
 
 The workflow entry does not complete the hardening Definition of Done by
-itself. The DoD remains open until recorded runner pass evidence exists for the
-specific release candidate across Debug, Release, ASan+UBSan, and TSan.
+itself. Evidence commit `ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` recorded
+`Debug Release` run `28219130885`; each future release candidate must record
+runner pass evidence across Debug, Release, ASan+UBSan, and TSan.
 
 ## End-to-End Overload Gate
 
@@ -118,10 +120,11 @@ configuration that attempts to enable both sanitizer families. Keep ASan+UBSan
 and TSan in separate CI jobs and local build directories so their runtimes do
 not conflict.
 
-This workflow does not mean the release hardening Definition of Done is already
-complete. It only creates a repeatable evidence path; the DoD item remains open
-until recorded Debug, Release, ASan+UBSan, and TSan results exist for the
-release candidate.
+This workflow does not complete release hardening by itself. It creates a
+repeatable evidence path; evidence commit
+`ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` recorded `ASan UBSan` run
+`28219130878`, and future release candidates must record their own Debug,
+Release, ASan+UBSan, and TSan results.
 
 Benchmark records include commit, compiler, standard library, flags, CPU,
 operating system/kernel, workload, throughput, latency percentiles, peak RSS,

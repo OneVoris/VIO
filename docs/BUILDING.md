@@ -38,9 +38,11 @@ build, and test sequence on `ubuntu-latest` and `windows-latest`, registers
 VXrepo, refreshes repository metadata, records `xrepo info voris-vmem` before
 configuration, and runs `python tools/check_repository.py`.
 
-This workflow is only an evidence collection entry point. The release
-Definition of Done remains open until recorded runner passes exist for the
-candidate across Debug, Release, ASan+UBSan, and TSan configurations.
+This workflow is an evidence collection entry point. Evidence commit
+`ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` recorded `Debug Release` run
+`28219130885`; future candidates still need recorded runner passes across
+Debug, Release, ASan+UBSan, and TSan configurations before claiming the release
+Definition of Done.
 
 ## Options
 
@@ -63,21 +65,24 @@ Use separate build directories or CI workspaces for ASan+UBSan and TSan. The
 exclusive so one sanitizer family cannot be mixed into the same configuration.
 
 ASan+UBSan is a Linux clang/gcc-like configuration. The repository CI entry uses
-clang on `ubuntu-latest` and covers both debug and release modes:
+the runner GCC C++ toolchain on `ubuntu-latest` and covers both debug and
+release modes:
 
 ```bash
-xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=gcc --cxx=g++
 xmake
 xmake test
 
-xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=gcc --cxx=g++
 xmake
 xmake test
 ```
 
-This configuration is an evidence collection entry point. It does not by itself
-complete the release Definition of Done; release validation still needs recorded
-Debug, Release, ASan+UBSan, and TSan results for the candidate being approved.
+This configuration is an evidence collection entry point. Evidence commit
+`ea0d6568a37c35f5efa63f57c924b1fa8d6a8d66` recorded `ASan UBSan` run
+`28219130878`; release validation still needs recorded Debug, Release,
+ASan+UBSan, and TSan results for each future candidate before claiming the
+release Definition of Done.
 
 ## Validation
 
