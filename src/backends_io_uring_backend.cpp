@@ -45,9 +45,18 @@ constexpr unsigned op_connect = 16U;
 constexpr unsigned op_files_update = 20U;
 constexpr unsigned op_read = 22U;
 constexpr unsigned op_write = 23U;
+constexpr unsigned sq_cq_overflow = 1U << 1U;
+constexpr unsigned sq_taskrun = 1U << 2U;
+constexpr unsigned enter_getevents = 1U << 0U;
 constexpr std::uint64_t cancel_user_data_tag = 1ULL << 63U;
 // io_uring CQEs report Linux errno values; keep the helper testable off Linux.
 constexpr int linux_ecanceled = 125;
+
+#if defined(__linux__) && __has_include(<linux/io_uring.h>)
+static_assert(sq_cq_overflow == IORING_SQ_CQ_OVERFLOW);
+static_assert(sq_taskrun == IORING_SQ_TASKRUN);
+static_assert(enter_getevents == IORING_ENTER_GETEVENTS);
+#endif
 
 struct decoded_kernel_user_data {
     std::size_t operation_id{};
@@ -309,6 +318,10 @@ bool io_uring_cancel_retry_required(bool cancel_requested,
            !cancel_sqe_in_flight;
 }
 
+bool io_uring_cq_needs_kernel_enter(unsigned sq_flags) noexcept {
+    return (sq_flags & (sq_cq_overflow | sq_taskrun)) != 0U;
+}
+
 io_uring_completion_result_class io_uring_completion_result_for(
     backend_operation_target target,
     bool cancel_requested,
@@ -507,6 +520,26 @@ struct io_uring_backend::kernel_ring {
         return pending_submissions;
     }
 
+    [[nodiscard]] bool cq_needs_kernel_enter() const noexcept {
+        return detail::io_uring_cq_needs_kernel_enter(
+            std::atomic_ref<unsigned>(*sq_flags).load());
+    }
+
+    [[nodiscard]] void_result enter_for_cq_events() {
+        for (;;) {
+            const long entered =
+                ::syscall(SYS_io_uring_enter, fd, 0U, 0U, enter_getevents,
+                          nullptr, 0U);
+            if (entered >= 0) {
+                return {};
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            return std::unexpected(provider_failure(errno));
+        }
+    }
+
     [[nodiscard]] std::size_t drain_cqes(std::span<io_uring_cqe> out) {
         const auto head = std::atomic_ref<unsigned>(*cq_head).load();
         const auto tail = std::atomic_ref<unsigned>(*cq_tail).load();
@@ -534,6 +567,7 @@ struct io_uring_backend::kernel_ring {
     std::size_t sqes_mapping_size{0};
     unsigned* sq_head{nullptr};
     unsigned* sq_tail{nullptr};
+    unsigned* sq_flags{nullptr};
     unsigned* sq_ring_mask{nullptr};
     unsigned* sq_ring_entries{nullptr};
     unsigned* sq_array{nullptr};
@@ -593,6 +627,7 @@ private:
         auto* cq_base = static_cast<std::byte*>(cq_ring_mapping);
         sq_head = reinterpret_cast<unsigned*>(sq_base + params.sq_off.head);
         sq_tail = reinterpret_cast<unsigned*>(sq_base + params.sq_off.tail);
+        sq_flags = reinterpret_cast<unsigned*>(sq_base + params.sq_off.flags);
         sq_ring_mask = reinterpret_cast<unsigned*>(sq_base + params.sq_off.ring_mask);
         sq_ring_entries = reinterpret_cast<unsigned*>(sq_base + params.sq_off.ring_entries);
         sq_array = reinterpret_cast<unsigned*>(sq_base + params.sq_off.array);
@@ -1697,6 +1732,11 @@ io_result<std::size_t> io_uring_backend::observe_kernel_completions() {
     auto retried = retry_missing_kernel_cancellations();
     if (!retried.has_value()) {
         return std::unexpected(retried.error());
+    }
+    if (kernel_ring_->cq_needs_kernel_enter()) {
+        if (auto entered = kernel_ring_->enter_for_cq_events(); !entered.has_value()) {
+            return std::unexpected(entered.error());
+        }
     }
 
     std::vector<io_uring_cqe> batch(options_.completion_batch_limit);

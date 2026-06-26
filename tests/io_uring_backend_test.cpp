@@ -367,6 +367,22 @@ void test_io_uring_cancellation_completion_mapping_preserves_first_cancel_reason
            io_uring_completion_result_class::closed);
 }
 
+void test_io_uring_cq_overflow_and_taskrun_flags_require_kernel_enter() {
+    constexpr unsigned sq_need_wakeup = 1U << 0U;
+    constexpr unsigned sq_cq_overflow = 1U << 1U;
+    constexpr unsigned sq_taskrun = 1U << 2U;
+
+    assert(!voris::io::backends::detail::io_uring_cq_needs_kernel_enter(0U));
+    assert(!voris::io::backends::detail::io_uring_cq_needs_kernel_enter(
+        sq_need_wakeup));
+    assert(voris::io::backends::detail::io_uring_cq_needs_kernel_enter(
+        sq_cq_overflow));
+    assert(voris::io::backends::detail::io_uring_cq_needs_kernel_enter(
+        sq_taskrun));
+    assert(voris::io::backends::detail::io_uring_cq_needs_kernel_enter(
+        sq_need_wakeup | sq_cq_overflow | sq_taskrun));
+}
+
 #if defined(__linux__)
 class unique_fd {
 public:
@@ -2778,6 +2794,7 @@ int main() {
     test_backend_contract_carries_file_payloads_offsets_and_fsync();
     test_io_uring_close_completion_mapping_is_target_aware();
     test_io_uring_cancellation_completion_mapping_preserves_first_cancel_reason();
+    test_io_uring_cq_overflow_and_taskrun_flags_require_kernel_enter();
     test_probe_opcode_mapping_is_deterministic();
     test_probe_files_require_read_write_and_fsync();
     test_probe_registered_capabilities_are_independent_candidates();

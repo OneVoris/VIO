@@ -132,6 +132,7 @@ take_unsubmitted_io_uring_submissions(
     bool close_requested,
     bool cancel_request_submitted,
     bool cancel_sqe_in_flight) noexcept;
+[[nodiscard]] bool io_uring_cq_needs_kernel_enter(unsigned sq_flags) noexcept;
 [[nodiscard]] io_uring_completion_result_class io_uring_completion_result_for(
     backend_operation_target target,
     bool cancel_requested,
