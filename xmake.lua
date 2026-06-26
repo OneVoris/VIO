@@ -5,6 +5,12 @@ set_warnings("allextra")
 add_rules("mode.debug", "mode.release")
 add_repositories("vxrepo https://github.com/OneVoris/VXrepo.git")
 
+interp_add_scopeapis({custom = {
+    {"raise", function (interp, message)
+        interp._raise(message)
+    end}
+}})
+
 option("build_shared")
     set_default(false)
     set_showmenu(true)
@@ -36,6 +42,21 @@ option("sanitize_thread")
     set_description("Enable ThreadSanitizer on supported Linux clang/gcc-like toolchains.")
 option_end()
 
+option("sanitize_address_undefined")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable AddressSanitizer and UndefinedBehaviorSanitizer on supported Linux clang/gcc-like toolchains.")
+option_end()
+
+local sanitizer_conflict = has_config("sanitize_thread") and has_config("sanitize_address_undefined")
+local unsupported_asan_platform = has_config("sanitize_address_undefined") and not is_plat("linux")
+
+if sanitizer_conflict then
+    raise("sanitize_thread and sanitize_address_undefined cannot be enabled together")
+elseif unsupported_asan_platform then
+    raise("sanitize_address_undefined is supported only on Linux clang/gcc-like toolchains")
+end
+
 add_requires("voris-vmem")
 
 if has_config("sanitize_thread") then
@@ -43,6 +64,11 @@ if has_config("sanitize_thread") then
         add_cxflags("-fsanitize=thread", "-fno-omit-frame-pointer", {force = true})
         add_ldflags("-fsanitize=thread", {force = true})
     end
+end
+
+if has_config("sanitize_address_undefined") then
+    add_cxflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer", {force = true})
+    add_ldflags("-fsanitize=address,undefined", {force = true})
 end
 
 target("voris_vio")

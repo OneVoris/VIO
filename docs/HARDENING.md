@@ -79,6 +79,34 @@ ASan/UBSan in the same build. Platform-specific backend tests may report an
 unsupported-platform skip on Linux; release evidence still records the target,
 command, exit status, and skip or pass output.
 
+## ASan+UBSan Coverage
+
+The `ASan UBSan` GitHub Actions workflow is the repository entry point for
+AddressSanitizer and UndefinedBehaviorSanitizer evidence. It runs on
+`ubuntu-latest` with clang, installs latest xmake, registers VXrepo, records
+`xrepo info voris-vmem`, and runs both debug and release test configurations:
+
+```bash
+xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake
+xmake test
+
+xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake
+xmake test
+```
+
+The `sanitize_address_undefined` option is intended for Linux clang/gcc-like
+toolchains. It is mutually exclusive with `sanitize_thread`, and xmake rejects a
+configuration that attempts to enable both sanitizer families. Keep ASan+UBSan
+and TSan in separate CI jobs and local build directories so their runtimes do
+not conflict.
+
+This workflow does not mean the release hardening Definition of Done is already
+complete. It only creates a repeatable evidence path; the DoD item remains open
+until recorded Debug, Release, ASan+UBSan, and TSan results exist for the
+release candidate.
+
 Benchmark records include commit, compiler, standard library, flags, CPU,
 operating system/kernel, workload, throughput, latency percentiles, peak RSS,
 allocations per operation, and timeout/error counts.

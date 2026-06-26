@@ -1,0 +1,54 @@
+name: ASan UBSan
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  asan-ubsan:
+    name: ASan+UBSan (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [debug, release]
+    env:
+      CC: clang
+      CXX: clang++
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Install latest xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Register VXrepo
+        run: |
+          xrepo add-repo vxrepo https://github.com/OneVoris/VXrepo.git
+          xrepo update-repo
+
+      - name: Record resolved VMem package
+        run: xrepo info voris-vmem
+
+      - name: Configure ASan+UBSan build
+        run: xmake f -m ${{ matrix.mode }} --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+
+      - name: Build ASan+UBSan tests
+        run: |
+          xmake
+
+      - name: Run ASan+UBSan tests
+        run: xmake test

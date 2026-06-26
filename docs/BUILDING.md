@@ -39,12 +39,33 @@ The repository never assumes sibling source checkouts. Development overrides mus
 | `build_examples` | `false` | Build examples when implementation examples exist. |
 | `build_benchmarks` | `false` | Build benchmark targets. |
 | `build_fuzzers` | `false` | Build fuzz targets with the selected toolchain. |
+| `sanitize_thread` | `false` | Enable ThreadSanitizer on supported Linux clang/gcc-like toolchains. |
+| `sanitize_address_undefined` | `false` | Enable AddressSanitizer and UndefinedBehaviorSanitizer on supported Linux clang/gcc-like toolchains. |
 
 Project-specific component options are documented in `xmake.lua` comments and the architecture document.
 
 ## Sanitizers
 
-Use separate build directories or CI workspaces for ASan+UBSan and TSan. Do not combine TSan with ASan.
+Use separate build directories or CI workspaces for ASan+UBSan and TSan. The
+`sanitize_address_undefined` and `sanitize_thread` options are mutually
+exclusive so one sanitizer family cannot be mixed into the same configuration.
+
+ASan+UBSan is a Linux clang/gcc-like configuration. The repository CI entry uses
+clang on `ubuntu-latest` and covers both debug and release modes:
+
+```bash
+xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake
+xmake test
+
+xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake
+xmake test
+```
+
+This configuration is an evidence collection entry point. It does not by itself
+complete the release Definition of Done; release validation still needs recorded
+Debug, Release, ASan+UBSan, and TSan results for the candidate being approved.
 
 ## Validation
 

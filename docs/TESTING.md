@@ -82,6 +82,38 @@ resolved `xrepo info voris-vmem` output, target list, and pass/skip/failure
 result in hardening evidence. Backend targets that are unsupported on the Linux
 runner must still be listed so their skip paths remain visible.
 
+## ASan+UBSan
+
+AddressSanitizer and UndefinedBehaviorSanitizer are enabled together through
+the `sanitize_address_undefined` option. This is a Linux clang/gcc-like
+configuration and must stay separate from TSan; `xmake.lua` rejects
+`sanitize_thread=y` and `sanitize_address_undefined=y` in the same configure
+step.
+
+Local Linux clang evidence uses the same commands as CI:
+
+```bash
+xrepo add-repo vxrepo https://github.com/OneVoris/VXrepo.git
+xrepo update-repo
+
+xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xrepo info voris-vmem
+xmake
+xmake test
+
+xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xrepo info voris-vmem
+xmake
+xmake test
+```
+
+The `ASan UBSan` GitHub Actions workflow runs those debug and release entries on
+`ubuntu-latest`, installs the latest xmake action and clang, registers VXrepo,
+records `xrepo info voris-vmem`, builds, and runs `xmake test`. The workflow is
+a release-evidence collection entry point only. The global Definition of Done
+stays unchecked until complete Debug, Release, ASan+UBSan, and TSan evidence is
+recorded for the release candidate.
+
 ## Hardening Stress
 
 The default hardening stress gate is included in `xmake test` through the
