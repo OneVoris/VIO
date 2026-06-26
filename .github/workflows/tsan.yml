@@ -35,11 +35,11 @@ jobs:
           xrepo add-repo vxrepo https://github.com/OneVoris/VXrepo.git
           xrepo update-repo
 
-      - name: Configure TSan build
-        run: xmake f -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
-
       - name: Record resolved VMem package
         run: xrepo info voris-vmem
+
+      - name: Configure TSan build
+        run: xmake f -y -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
 
       - name: Build TSan tests
         run: xmake

@@ -38,7 +38,7 @@ jobs:
         run: python tools/check_repository.py
 
       - name: Configure tests
-        run: xmake f -m ${{ matrix.mode }} --build_tests=y
+        run: xmake f -y -m ${{ matrix.mode }} --build_tests=y
 
       - name: Build tests
         run: |

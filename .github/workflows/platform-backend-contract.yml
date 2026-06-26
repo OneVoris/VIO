@@ -36,6 +36,9 @@ jobs:
           xrepo add-repo vxrepo https://github.com/OneVoris/VXrepo.git
           xrepo update-repo
 
+      - name: Record resolved VMem package
+        run: xrepo info voris-vmem
+
       - name: Record platform contract path
         run: |
           echo "runner=${{ matrix.os }}"
@@ -46,10 +49,7 @@ jobs:
         run: python tools/check_repository.py
 
       - name: Configure debug tests
-        run: xmake f -m debug --build_tests=y
-
-      - name: Record resolved VMem package
-        run: xrepo info voris-vmem
+        run: xmake f -y -m debug --build_tests=y
 
       - name: Build debug tests
         run: |

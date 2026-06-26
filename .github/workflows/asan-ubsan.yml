@@ -44,7 +44,7 @@ jobs:
         run: xrepo info voris-vmem
 
       - name: Configure ASan+UBSan build
-        run: xmake f -m ${{ matrix.mode }} --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+        run: xmake f -y -m ${{ matrix.mode }} --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
 
       - name: Build ASan+UBSan tests
         run: |
