@@ -6,7 +6,6 @@
 #include <coroutine>
 #include <exception>
 #include <fstream>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -185,7 +184,7 @@ class blocking_file_operation {
 
 public:
     using result_type = io_result<T>;
-    using work_type = std::move_only_function<result_type()>;
+    using work_type = detail::move_only_function<result_type()>;
 
     blocking_file_operation(blocking_executor& executor, scheduler_ref scheduler, work_type work)
         : state_(std::make_shared<operation_state>(scheduler, std::move(work))) {

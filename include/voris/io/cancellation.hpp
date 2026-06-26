@@ -1,10 +1,11 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
+
+#include <voris/io/detail/continuation.hpp>
 
 namespace voris::io {
 
@@ -30,7 +31,7 @@ struct cancellation_callback_slot;
 
 } // namespace detail
 
-using cancellation_callback = std::move_only_function<void(cancellation_reason)>;
+using cancellation_callback = detail::move_only_function<void(cancellation_reason)>;
 
 class cancellation_registration {
 public:

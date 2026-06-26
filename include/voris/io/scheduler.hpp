@@ -4,16 +4,14 @@
 #include <concepts>
 #include <deque>
 #include <expected>
-#include <functional>
 #include <optional>
 #include <type_traits>
 #include <utility>
 
+#include <voris/io/detail/continuation.hpp>
 #include <voris/io/error.hpp>
 
 namespace voris::io {
-
-using continuation = std::move_only_function<void()>;
 
 namespace detail {
 

@@ -1,10 +1,23 @@
 #include <voris/io/cancellation.hpp>
 
 #include "test_assert.hpp"
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+
+namespace {
+
+int cancellation_function_pointer_calls = 0;
+
+void record_cancellation_function_pointer_call(voris::io::cancellation_reason reason) {
+    assert(reason == voris::io::cancellation_reason::manual);
+    ++cancellation_function_pointer_calls;
+}
+
+} // namespace
 
 int main() {
     using namespace voris::io;
@@ -13,6 +26,24 @@ int main() {
     static_assert(std::is_copy_constructible_v<cancellation_source>);
     static_assert(!std::is_copy_constructible_v<cancellation_registration>);
     static_assert(std::is_move_constructible_v<cancellation_registration>);
+    static_assert(!std::is_copy_constructible_v<cancellation_callback>);
+    static_assert(!std::is_copy_assignable_v<cancellation_callback>);
+#if defined(__cpp_lib_move_only_function)
+    static_assert(
+        !std::is_same_v<cancellation_callback, std::move_only_function<void(cancellation_reason)>>);
+#endif
+
+    using cancellation_function_pointer = void (*)(cancellation_reason);
+    cancellation_function_pointer missing_cancellation_function = nullptr;
+    cancellation_callback null_cancellation_function(missing_cancellation_function);
+    assert(!null_cancellation_function);
+
+    cancellation_function_pointer present_cancellation_function =
+        &record_cancellation_function_pointer_call;
+    cancellation_callback cancellation_function_callback(present_cancellation_function);
+    assert(cancellation_function_callback);
+    cancellation_function_callback(cancellation_reason::manual);
+    assert(cancellation_function_pointer_calls == 1);
 
     assert(to_string(cancellation_reason::manual) == std::string_view("manual"));
     assert(to_string(cancellation_reason::deadline) == std::string_view("deadline"));
@@ -123,6 +154,25 @@ int main() {
         assert(source.request_cancellation(cancellation_reason::scope_shutdown));
         assert(calls == 1);
         assert(!internal_lock_was_held);
+        assert(!registration.active());
+    }
+
+    {
+        cancellation_source source;
+        cancellation_token token = source.token();
+        auto marker = std::make_unique<int>(17);
+        int seen = 0;
+
+        auto registration = token.register_callback(
+            [moved = std::move(marker), &seen](cancellation_reason reason) {
+                assert(reason == cancellation_reason::manual);
+                seen = *moved;
+            });
+
+        assert(marker == nullptr);
+        assert(registration.active());
+        assert(source.request_cancellation(cancellation_reason::manual));
+        assert(seen == 17);
         assert(!registration.active());
     }
 

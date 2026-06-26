@@ -2,14 +2,15 @@
 
 #include <cstddef>
 #include <deque>
-#include <functional>
 #include <utility>
+
+#include <voris/io/scheduler.hpp>
 
 namespace voris::io {
 
 class test_scheduler {
 public:
-    using continuation = std::move_only_function<void()>;
+    using continuation = voris::io::continuation;
 
     test_scheduler() = default;
 
