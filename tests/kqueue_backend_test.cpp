@@ -406,8 +406,8 @@ void test_shutdown_defines_later_behavior() {
     assert(backend.shutdown().has_value());
     assert(backend.shutdown().has_value());
 
-    assert_void_error(backend.register_handle(static_cast<std::size_t>(second.get())),
-                      voris::io::vio_error_code::closed);
+    assert_token_error(backend.register_handle(static_cast<std::size_t>(second.get())),
+                       voris::io::vio_error_code::closed);
     assert_void_error(backend.submit(operation(502, token)), voris::io::vio_error_code::closed);
     assert_void_error(backend.cancel(501, voris::io::cancellation_reason::manual),
                       voris::io::vio_error_code::closed);
