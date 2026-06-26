@@ -55,8 +55,9 @@ work neither runs later nor leaves persistent queue growth.
 ## ThreadSanitizer Coverage
 
 The `ThreadSanitizer` GitHub Actions workflow registers VXrepo explicitly,
-records `xrepo info voris-vmem`, builds the debug test suite on Linux with
-clang and `--sanitize_thread=y`, then runs the M8 TSan gate by category:
+records `xrepo info voris-vmem`, verifies the GCC C++23 standard library,
+builds the debug test suite on Linux with `--sanitize_thread=y`, then runs the
+M8 TSan gate by category:
 
 - tasks: `vio_task_test`, `vio_task_lifetime_test`, `vio_when_all_test`,
   `vio_when_any_test`;
@@ -67,10 +68,10 @@ clang and `--sanitize_thread=y`, then runs the M8 TSan gate by category:
   `vio_epoll_backend_test`, `vio_io_uring_backend_test`,
   `vio_kqueue_backend_test`, `vio_iocp_backend_test`.
 
-Local Linux clang evidence uses the same configuration:
+Local Linux GCC evidence uses the same configuration:
 
 ```bash
-xmake f -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
+xmake f -m debug --build_tests=y --sanitize_thread=y --cc=gcc --cxx=g++
 xmake
 xmake run vio_task_test
 xmake run vio_task_lifetime_test
@@ -88,7 +89,7 @@ xmake run vio_kqueue_backend_test
 xmake run vio_iocp_backend_test
 ```
 
-TSan is a Linux clang gate for this repository and is not combined with
+TSan is a Linux GCC/gcc-like gate for this repository and is not combined with
 ASan/UBSan in the same build. Platform-specific backend tests may report an
 unsupported-platform skip on Linux; release evidence still records the target,
 command, exit status, and skip or pass output.
@@ -97,20 +98,21 @@ command, exit status, and skip or pass output.
 
 The `ASan UBSan` GitHub Actions workflow is the repository entry point for
 AddressSanitizer and UndefinedBehaviorSanitizer evidence. It runs on
-`ubuntu-latest` with clang, installs latest xmake, registers VXrepo, records
+`ubuntu-latest` with the runner GCC C++ toolchain, installs latest xmake,
+verifies `std::expected`/`std::unexpected`, registers VXrepo, records
 `xrepo info voris-vmem`, and runs both debug and release test configurations:
 
 ```bash
-xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=gcc --cxx=g++
 xmake
 xmake test
 
-xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=gcc --cxx=g++
 xmake
 xmake test
 ```
 
-The `sanitize_address_undefined` option is intended for Linux clang/gcc-like
+The `sanitize_address_undefined` option is intended for Linux GCC/gcc-like
 toolchains. It is mutually exclusive with `sanitize_thread`, and xmake rejects a
 configuration that attempts to enable both sanitizer families. Keep ASan+UBSan
 and TSan in separate CI jobs and local build directories so their runtimes do

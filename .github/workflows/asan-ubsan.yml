@@ -19,18 +19,37 @@ jobs:
       matrix:
         mode: [debug, release]
     env:
-      CC: clang
-      CXX: clang++
+      CC: gcc
+      CXX: g++
       ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install clang
+      - name: Install GCC C++ toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y g++
+
+      - name: Verify C++23 standard library
+        run: |
+          "$CXX" --version
+          "$CXX" -std=c++23 -x c++ -o /tmp/vio_expected_probe - <<'CPP'
+          #include <expected>
+          #include <string>
+
+          int main() {
+              std::expected<int, std::string> value = 7;
+              if (!value || *value != 7) {
+                  return 1;
+              }
+
+              std::expected<int, std::string> error = std::unexpected(std::string("error"));
+              return error ? 1 : 0;
+          }
+          CPP
+          /tmp/vio_expected_probe
 
       - name: Install latest xmake
         uses: xmake-io/github-action-setup-xmake@v1
@@ -44,7 +63,7 @@ jobs:
         run: xrepo info voris-vmem
 
       - name: Configure ASan+UBSan build
-        run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m ${{ matrix.mode }} --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+        run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m ${{ matrix.mode }} --build_tests=y --sanitize_address_undefined=y --cc="$CC" --cxx="$CXX"
 
       - name: Build ASan+UBSan tests
         run: python .github/scripts/run_xmake_step.py -- xmake -vD

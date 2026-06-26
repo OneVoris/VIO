@@ -15,17 +15,36 @@ jobs:
     name: TSan coverage
     runs-on: ubuntu-latest
     env:
-      CC: clang
-      CXX: clang++
+      CC: gcc
+      CXX: g++
       TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install clang
+      - name: Install GCC C++ toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y g++
+
+      - name: Verify C++23 standard library
+        run: |
+          "$CXX" --version
+          "$CXX" -std=c++23 -x c++ -o /tmp/vio_expected_probe - <<'CPP'
+          #include <expected>
+          #include <string>
+
+          int main() {
+              std::expected<int, std::string> value = 7;
+              if (!value || *value != 7) {
+                  return 1;
+              }
+
+              std::expected<int, std::string> error = std::unexpected(std::string("error"));
+              return error ? 1 : 0;
+          }
+          CPP
+          /tmp/vio_expected_probe
 
       - name: Install latest xmake
         uses: xmake-io/github-action-setup-xmake@v1
@@ -39,7 +58,7 @@ jobs:
         run: xrepo info voris-vmem
 
       - name: Configure TSan build
-        run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
+        run: python .github/scripts/run_xmake_step.py -- xmake f -vD -y -m debug --build_tests=y --sanitize_thread=y --cc="$CC" --cxx="$CXX"
 
       - name: Build TSan tests
         run: python .github/scripts/run_xmake_step.py -- xmake -vD

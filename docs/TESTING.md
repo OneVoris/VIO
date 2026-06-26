@@ -66,11 +66,14 @@ passes from real runners are attached to the task evidence.
 
 ## ThreadSanitizer
 
-The TSan configuration is enabled explicitly and is intended for Linux clang
-builds. Do not combine it with ASan/UBSan in the same build directory.
+The TSan configuration is enabled explicitly and is intended for Linux
+GCC/gcc-like C++23 builds. CI uses the `ubuntu-latest` GCC C++ toolchain and
+verifies `std::expected`/`std::unexpected` before configuring XMake so VXrepo
+packages such as `voris-vmem` are built with a compatible standard library. Do
+not combine TSan with ASan/UBSan in the same build directory.
 
 ```bash
-xmake f -m debug --build_tests=y --sanitize_thread=y --cc=clang --cxx=clang++
+xmake f -m debug --build_tests=y --sanitize_thread=y --cc=gcc --cxx=g++
 xmake
 ```
 
@@ -95,40 +98,42 @@ xmake run vio_iocp_backend_test
 
 The CI workflow registers VXrepo before configuring the build, then groups
 those targets as tasks, scopes, channels, mailboxes, and backends. Record the
-compiler, operating system/kernel, VXrepo registration step, `xmake f` line,
-resolved `xrepo info voris-vmem` output, target list, and pass/skip/failure
-result in hardening evidence. Backend targets that are unsupported on the Linux
-runner must still be listed so their skip paths remain visible.
+compiler, operating system/kernel, C++23 standard-library probe, VXrepo
+registration step, `xmake f` line, resolved `xrepo info voris-vmem` output,
+target list, and pass/skip/failure result in hardening evidence. Backend
+targets that are unsupported on the Linux runner must still be listed so their
+skip paths remain visible.
 
 ## ASan+UBSan
 
 AddressSanitizer and UndefinedBehaviorSanitizer are enabled together through
-the `sanitize_address_undefined` option. This is a Linux clang/gcc-like
+the `sanitize_address_undefined` option. This is a Linux GCC/gcc-like
 configuration and must stay separate from TSan; `xmake.lua` rejects
 `sanitize_thread=y` and `sanitize_address_undefined=y` in the same configure
 step.
 
-Local Linux clang evidence uses the same commands as CI:
+Local Linux GCC evidence uses the same xmake configuration as CI:
 
 ```bash
 xrepo add-repo vxrepo https://github.com/OneVoris/VXrepo.git
 xrepo update-repo
 
-xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake f -m debug --build_tests=y --sanitize_address_undefined=y --cc=gcc --cxx=g++
 xrepo info voris-vmem
 xmake
 xmake test
 
-xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=clang --cxx=clang++
+xmake f -m release --build_tests=y --sanitize_address_undefined=y --cc=gcc --cxx=g++
 xrepo info voris-vmem
 xmake
 xmake test
 ```
 
 The `ASan UBSan` GitHub Actions workflow runs those debug and release entries on
-`ubuntu-latest`, installs the latest xmake action and clang, registers VXrepo,
-records `xrepo info voris-vmem`, builds, and runs `xmake test`. The workflow is
-a release-evidence collection entry point only. The global Definition of Done
+`ubuntu-latest`, installs the latest xmake action, uses the runner GCC C++
+toolchain, verifies `std::expected`/`std::unexpected`, registers VXrepo, records
+`xrepo info voris-vmem`, builds, and runs `xmake test`. The workflow is a
+release-evidence collection entry point only. The global Definition of Done
 stays unchecked until complete Debug, Release, ASan+UBSan, and TSan evidence is
 recorded for the release candidate.
 
