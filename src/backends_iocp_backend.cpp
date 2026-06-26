@@ -89,6 +89,11 @@ struct iocp_backend::operation_storage {
 #endif
 };
 
+void iocp_backend::operation_storage_deleter::operator()(
+    operation_storage* storage) const noexcept {
+    delete storage;
+}
+
 iocp_backend::iocp_backend(iocp_backend_options options) : options_(options) {
     if (options_.completion_batch_limit == 0) {
         options_.completion_batch_limit = 1;
@@ -789,7 +794,7 @@ void_result iocp_backend::submit(backend_operation operation) {
         return std::unexpected(key.error());
     }
 
-    auto storage = std::make_unique<operation_storage>();
+    operation_storage_ptr storage{new operation_storage()};
     storage->operation = operation;
     storage->completion_key = *key;
     void* overlapped = storage->overlapped_address();

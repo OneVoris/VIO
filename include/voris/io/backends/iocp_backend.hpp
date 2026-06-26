@@ -204,6 +204,11 @@ private:
         bool bump_generation_on_reuse{};
     };
     struct operation_storage;
+    struct operation_storage_deleter {
+        void operator()(operation_storage* storage) const noexcept;
+    };
+    using operation_storage_ptr = std::unique_ptr<operation_storage,
+                                                  operation_storage_deleter>;
 
     [[nodiscard]] io_result<detail::iocp_completion_key_token> create_association(
         backend_handle_token token);
@@ -237,7 +242,7 @@ private:
     virtual_backend fallback_;
     std::deque<detail::iocp_native_completion_packet> native_packets_{};
     std::deque<backend_completion> completion_queue_{};
-    std::unordered_map<std::size_t, std::unique_ptr<operation_storage>> operations_{};
+    std::unordered_map<std::size_t, operation_storage_ptr> operations_{};
     std::list<std::size_t> operation_submission_order_{};
     std::unordered_map<std::size_t, std::list<std::size_t>::iterator> operation_order_by_id_{};
     std::unordered_map<void*, std::size_t> operation_id_by_overlapped_{};
